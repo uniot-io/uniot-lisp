@@ -11,14 +11,14 @@ static __attribute((noreturn)) void error(char *fmt, ...) {
 }
 
 // Constants
-static Obj *True = &(Obj){ TTRUE };
-static Obj *Nil = &(Obj){ TNIL };
-static Obj *Dot = &(Obj){ TDOT };
-static Obj *Cparen = &(Obj){ TCPAREN };
+Obj *True = &(Obj){ TTRUE };
+Obj *Nil = &(Obj){ TNIL };
+Obj *Dot = &(Obj){ TDOT };
+Obj *Cparen = &(Obj){ TCPAREN };
 
 // The list containing all symbols. Such data structure is traditionally called the "obarray", but I
 // avoid using it as a variable name as this is not an array but a list.
-static Obj *Symbols;
+Obj *Symbols;
 
 //======================================================================
 // Memory management

@@ -81,4 +81,14 @@ typedef struct Obj {
     };
 } Obj;
 
+// Constants
+extern Obj *True;
+extern Obj *Nil;
+extern Obj *Dot;
+extern Obj *Cparen;
+
+// The list containing all symbols. Such data structure is traditionally called the "obarray", but I
+// avoid using it as a variable name as this is not an array but a list.
+extern Obj *Symbols;
+
 #endif
