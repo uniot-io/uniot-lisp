@@ -4,6 +4,38 @@
 // The size of the heap in byte
 #define MEMORY_SIZE 65536
 
+#define ROOT_END ((void *)-1)
+
+#define ADD_ROOT(size)                          \
+    void *root_ADD_ROOT_[size + 2];             \
+    root_ADD_ROOT_[0] = root;                   \
+    for (int i = 1; i <= size; i++)             \
+        root_ADD_ROOT_[i] = NULL;               \
+    root_ADD_ROOT_[size + 1] = ROOT_END;        \
+    root = root_ADD_ROOT_
+
+#define DEFINE1(var1)                           \
+    ADD_ROOT(1);                                \
+    Obj **var1 = (Obj **)(root_ADD_ROOT_ + 1)
+
+#define DEFINE2(var1, var2)                     \
+    ADD_ROOT(2);                                \
+    Obj **var1 = (Obj **)(root_ADD_ROOT_ + 1);  \
+    Obj **var2 = (Obj **)(root_ADD_ROOT_ + 2)
+
+#define DEFINE3(var1, var2, var3)               \
+    ADD_ROOT(3);                                \
+    Obj **var1 = (Obj **)(root_ADD_ROOT_ + 1);  \
+    Obj **var2 = (Obj **)(root_ADD_ROOT_ + 2);  \
+    Obj **var3 = (Obj **)(root_ADD_ROOT_ + 3)
+
+#define DEFINE4(var1, var2, var3, var4)         \
+    ADD_ROOT(4);                                \
+    Obj **var1 = (Obj **)(root_ADD_ROOT_ + 1);  \
+    Obj **var2 = (Obj **)(root_ADD_ROOT_ + 2);  \
+    Obj **var3 = (Obj **)(root_ADD_ROOT_ + 3);  \
+    Obj **var4 = (Obj **)(root_ADD_ROOT_ + 4)
+    
 #include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
