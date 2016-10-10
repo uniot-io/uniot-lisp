@@ -24,24 +24,19 @@ Obj *Symbols;
 // Memory management
 //======================================================================
 
-// The size of the heap in byte
-#define MEMORY_SIZE 65536
-
 // The pointer pointing to the beginning of the current heap
-static void *memory;
+void *memory;
 
 // The pointer pointing to the beginning of the old heap
-static void *from_space;
+void *from_space;
 
 // The number of bytes allocated from the heap
-static size_t mem_nused = 0;
+size_t mem_nused = 0;
 
 // Flags to debug GC
-static bool gc_running = false;
-static bool debug_gc = false;
-static bool always_gc = false;
-
-static void gc(void *root);
+bool gc_running = false;
+bool debug_gc = false;
+bool always_gc = false;
 
 // Currently we are using Cheney's copying GC algorithm, with which the available memory is split
 // into two halves and all objects are moved from one half to another every time GC is invoked. That
@@ -192,7 +187,7 @@ static void forward_root_objects(void *root) {
 
 // Implements Cheney's copying garbage collection algorithm.
 // http://en.wikipedia.org/wiki/Cheney%27s_algorithm
-static void gc(void *root) {
+void gc(void *root) {
     assert(!gc_running);
     gc_running = true;
 

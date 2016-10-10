@@ -1,6 +1,9 @@
 #ifndef MINILISP_H
 #define MINILISP_H
 
+// The size of the heap in byte
+#define MEMORY_SIZE 65536
+
 #include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
@@ -90,5 +93,24 @@ extern Obj *Cparen;
 // The list containing all symbols. Such data structure is traditionally called the "obarray", but I
 // avoid using it as a variable name as this is not an array but a list.
 extern Obj *Symbols;
+
+// The size of the heap in byte
+#define MEMORY_SIZE 65536
+
+// The pointer pointing to the beginning of the current heap
+extern void *memory;
+
+// The pointer pointing to the beginning of the old heap
+extern void *from_space;
+
+// The number of bytes allocated from the heap
+extern size_t mem_nused;
+
+// Flags to debug GC
+extern bool gc_running;
+extern bool debug_gc;
+extern bool always_gc;
+
+void gc(void *root);
 
 #endif
