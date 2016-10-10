@@ -1,7 +1,7 @@
 // This software is in the public domain.
 #include "libminilisp.h"
 
-static __attribute((noreturn)) void error(char *fmt, ...) {
+void __attribute((noreturn)) error(char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
@@ -132,7 +132,7 @@ static inline Obj *forward(Obj *obj) {
     return newloc;
 }
 
-static void *alloc_semispace() {
+void *alloc_semispace() {
     return mmap(NULL, MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 }
 
@@ -385,7 +385,7 @@ Obj *read_expr(void *root) {
 }
 
 // Prints the given object.
-static void print(Obj *obj) {
+void print(Obj *obj) {
     switch (obj->type) {
     case TCELL:
         printf("(");
@@ -797,13 +797,13 @@ static void add_primitive(void *root, Obj **env, char *name, Primitive *fn) {
     add_variable(root, env, sym, prim);
 }
 
-static void define_constants(void *root, Obj **env) {
+void define_constants(void *root, Obj **env) {
     DEFINE1(sym);
     *sym = intern(root, "t");
     add_variable(root, env, sym, &True);
 }
 
-static void define_primitives(void *root, Obj **env) {
+void define_primitives(void *root, Obj **env) {
     add_primitive(root, env, "quote", prim_quote);
     add_primitive(root, env, "cons", prim_cons);
     add_primitive(root, env, "car", prim_car);
@@ -831,37 +831,7 @@ static void define_primitives(void *root, Obj **env) {
 //======================================================================
 
 // Returns true if the environment variable is defined and not the empty string.
-static bool getEnvFlag(char *name) {
+bool getEnvFlag(char *name) {
     char *val = getenv(name);
     return val && val[0];
-}
-
-int main(int argc, char **argv) {
-    // Debug flags
-    debug_gc = getEnvFlag("MINILISP_DEBUG_GC");
-    always_gc = getEnvFlag("MINILISP_ALWAYS_GC");
-
-    // Memory allocation
-    memory = alloc_semispace();
-
-    // Constants and primitives
-    Symbols = Nil;
-    void *root = NULL;
-    DEFINE2(env, expr);
-    *env = make_env(root, &Nil, &Nil);
-    define_constants(root, env);
-    define_primitives(root, env);
-
-    // The main loop
-    for (;;) {
-        *expr = read_expr(root);
-        if (!*expr)
-            return 0;
-        if (*expr == Cparen)
-            error("Stray close parenthesis");
-        if (*expr == Dot)
-            error("Stray dot");
-        print(eval(root, env, expr));
-        printf("\n");
-    }
 }

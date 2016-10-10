@@ -159,4 +159,18 @@ Obj *read_expr(void *root);
 
 Obj *eval(void *root, Obj **env, Obj **obj);
 
+bool getEnvFlag(char *name);
+
+void *alloc_semispace();
+
+struct Obj *make_env(void *root, Obj **vars, Obj **up);
+
+void define_constants(void *root, Obj **env);
+
+void define_primitives(void *root, Obj **env);
+
+void print(Obj *obj);
+
+void __attribute((noreturn)) error(char *fmt, ...);
+
 #endif
