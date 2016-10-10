@@ -35,7 +35,9 @@
     Obj **var2 = (Obj **)(root_ADD_ROOT_ + 2);  \
     Obj **var3 = (Obj **)(root_ADD_ROOT_ + 3);  \
     Obj **var4 = (Obj **)(root_ADD_ROOT_ + 4)
-    
+
+#define SYMBOL_MAX_LEN 200
+
 #include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
@@ -144,5 +146,17 @@ extern bool debug_gc;
 extern bool always_gc;
 
 void gc(void *root);
+
+// Cheney's algorithm uses two pointers to keep track of GC status. At first both pointers point to
+// the beginning of the to-space. As GC progresses, they are moved towards the end of the
+// to-space. The objects before "scan1" are the objects that are fully copied. The objects between
+// "scan1" and "scan2" have already been copied, but may contain pointers to the from-space. "scan2"
+// points to the beginning of the free space.
+Obj *scan1;
+Obj *scan2;
+
+Obj *read_expr(void *root);
+
+Obj *eval(void *root, Obj **env, Obj **obj);
 
 #endif

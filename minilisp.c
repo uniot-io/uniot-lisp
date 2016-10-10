@@ -106,14 +106,6 @@ static Obj *alloc(void *root, int type, size_t size) {
 // Garbage collector
 //======================================================================
 
-// Cheney's algorithm uses two pointers to keep track of GC status. At first both pointers point to
-// the beginning of the to-space. As GC progresses, they are moved towards the end of the
-// to-space. The objects before "scan1" are the objects that are fully copied. The objects between
-// "scan1" and "scan2" have already been copied, but may contain pointers to the from-space. "scan2"
-// points to the beginning of the free space.
-static Obj *scan1;
-static Obj *scan2;
-
 // Moves one object from the from-space to the to-space. Returns the object's new address. If the
 // object has already been moved, does nothing but just returns the new address.
 static inline Obj *forward(Obj *obj) {
@@ -266,10 +258,7 @@ static Obj *acons(void *root, Obj **x, Obj **y, Obj **a) {
 // This is a hand-written recursive-descendent parser.
 //======================================================================
 
-#define SYMBOL_MAX_LEN 200
 const char symbol_chars[] = "~!@#$%^&*-_=+:/?<>";
-
-static Obj *read_expr(void *root);
 
 static int peek(void) {
     int c = getchar();
@@ -353,7 +342,7 @@ static int read_number(int val) {
     return val;
 }
 
-static Obj *read_symbol(void *root, char c) {
+Obj *read_symbol(void *root, char c) {
     char buf[SYMBOL_MAX_LEN + 1];
     buf[0] = c;
     int len = 1;
@@ -366,7 +355,7 @@ static Obj *read_symbol(void *root, char c) {
     return intern(root, buf);
 }
 
-static Obj *read_expr(void *root) {
+Obj *read_expr(void *root) {
     for (;;) {
         int c = getchar();
         if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
@@ -444,8 +433,6 @@ static int length(Obj *list) {
 //======================================================================
 // Evaluator
 //======================================================================
-
-static Obj *eval(void *root, Obj **env, Obj **obj);
 
 static void add_variable(void *root, Obj **env, Obj **sym, Obj **val) {
     DEFINE2(vars, tmp);
@@ -545,7 +532,7 @@ static Obj *macroexpand(void *root, Obj **env, Obj **obj) {
 }
 
 // Evaluates the S expression.
-static Obj *eval(void *root, Obj **env, Obj **obj) {
+Obj *eval(void *root, Obj **env, Obj **obj) {
     switch ((*obj)->type) {
     case TINT:
     case TPRIMITIVE:
