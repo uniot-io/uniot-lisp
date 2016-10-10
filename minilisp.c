@@ -1,15 +1,5 @@
 // This software is in the public domain.
-
-#include <assert.h>
-#include <ctype.h>
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
+#include "minilisp.h"
 
 static __attribute((noreturn)) void error(char *fmt, ...) {
     va_list ap;
