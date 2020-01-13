@@ -1,0 +1,20 @@
+{
+    "name": "Uniot-Minilisp",
+    "keywords": "lisp, minilisp, iot",
+    "description": "A small LISP interpreter implementation in C",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/uniot-io/uniot-lisp.git"
+    },
+    "version": "0.1",
+    "license": "GPLv3",
+    "build": {
+        "includeDir": "src",
+        "srcDir": ".",
+        "srcFilter": "-<*> +<src/*>"
+    },
+    "frameworks": "arduino",
+    "platforms": [
+        "espressif8266"
+    ]
+}

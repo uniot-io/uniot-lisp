@@ -1,5 +1,13 @@
+# uniot-lisp
+This repository is part of the [Uniot](https://github.com/uniot-io) project. All necessary changes have been made so that it can exist as a module for the [uniot-core](https://github.com/uniot-io/uniot-core).
+
+Original repository: [minilisp](https://github.com/rui314/minilisp)
+
+The following is the original readme.
+
+
 MiniLisp
-========
+--------
 
 One day I wanted to see what I can do with 1k lines of C and
 decided to write a Lisp interpreter. That turned to be a
