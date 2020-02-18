@@ -173,6 +173,8 @@ Obj *eval_list(void *root, Obj **env, Obj **list);
 
 Obj *make_int(void *root, int value);
 
+Obj *make_symbol(void *root, const char *name);
+
 struct Obj *make_env(void *root, Obj **vars, Obj **up);
 
 int length(Obj *list);

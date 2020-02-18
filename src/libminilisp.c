@@ -301,17 +301,18 @@ Obj *make_int(void *root, int value) {
     return r;
 }
 
+Obj *make_symbol(void *root, const char *name)
+{
+    Obj *sym = alloc(root, TSYMBOL, strlen(name) + 1);
+    strcpy(sym->name, name);
+    return sym;
+}
+
 static Obj *cons(void *root, Obj **car, Obj **cdr) {
     Obj *cell = alloc(root, TCELL, sizeof(Obj *) * 2);
     cell->car = *car;
     cell->cdr = *cdr;
     return cell;
-}
-
-static Obj *make_symbol(void *root, const char *name) {
-    Obj *sym = alloc(root, TSYMBOL, strlen(name) + 1);
-    strcpy(sym->name, name);
-    return sym;
 }
 
 static Obj *make_primitive(void *root, Primitive *fn) {
