@@ -1,6 +1,6 @@
 /*
  * This is a part of the Uniot project. The following is the user apps interpreter.
- * Copyright (C) 2019-2020 Uniot <info.uniot@gmail.com>
+ * Copyright (C) 2019-2020 Uniot <contact@uniot.io>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -172,6 +172,8 @@ Obj *eval(void *root, Obj **env, Obj **obj);
 Obj *eval_list(void *root, Obj **env, Obj **list);
 
 Obj *make_int(void *root, int value);
+
+Obj *make_symbol(void *root, const char *name);
 
 struct Obj *make_env(void *root, Obj **vars, Obj **up);
 

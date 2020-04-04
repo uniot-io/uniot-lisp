@@ -1,6 +1,6 @@
 {
-    "name": "Uniot-Minilisp",
-    "keywords": "lisp, minilisp, iot",
+    "name": "uniot-lisp",
+    "keywords": "uniot, lisp, minilisp, iot",
     "description": "A small LISP interpreter implementation in C",
     "repository": {
         "type": "git",
