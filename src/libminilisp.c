@@ -791,6 +791,10 @@ static Obj *prim_modulo(void *root, Obj **env, Obj **list) {
     Obj *y = args->cdr->car;
     if (x->type != TINT || y->type != TINT)
         error("MODULO takes only numbers");
+
+    if (y->value == 0)
+        error("Division by zero");
+
     return make_int(root, x->value % y->value);
 }
 
