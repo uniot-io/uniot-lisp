@@ -1148,6 +1148,7 @@ Obj *get_variable(void *root, Obj **env, const char *name) {
 void define_constants(void *root, Obj **env) {
     add_constant(root, env, "#t", &True);
     add_constant_int(root, env, "#itr", 0);
+    add_constant_int(root, env, "#version", LISP_VERSION);
 }
 
 void define_primitives(void *root, Obj **env) {

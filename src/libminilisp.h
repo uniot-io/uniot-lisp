@@ -23,6 +23,8 @@
 extern "C" {
 #endif // __cplusplus
 
+#define LISP_VERSION 1
+
 #define LISP_MSG_BUF 100
 
 #define SYMBOL_MAX_LEN 200
