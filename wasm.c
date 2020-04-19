@@ -192,6 +192,48 @@ int version()
     return LIB_VERSION;
 }
 
+int str_replace(char *dest, int dest_size, char *orig, char *rep, char *with)
+{
+    int len_rep;   // length of rep (the string to remove)
+    int len_with;  // length of with (the string to replace rep with)
+    int len_front; // distance between rep and end of last rep
+    int count;     // number of replacements
+
+    // sanity checks and initialization
+    if (!orig || !rep)
+        return 0;
+    len_rep = strlen(rep);
+    if (len_rep == 0)
+        return 0; // empty rep causes infinite loop during count
+    if (!with)
+        with = "";
+    len_with = strlen(with);
+
+    // count the number of replacements needed
+    char *tmp = NULL;
+    char *ins = orig;
+    for (count = 0; (tmp = strstr(ins, rep)); ++count)
+        ins = tmp + len_rep;
+
+    int size = strlen(orig) + (len_with - len_rep) * count + 1;
+
+    if (size > dest_size)
+        return -1;
+
+    tmp = dest;
+    ins = NULL;
+    while (count--)
+    {
+        ins = strstr(orig, rep);
+        len_front = ins - orig;
+        tmp = strncpy(tmp, orig, len_front) + len_front;
+        tmp = strcpy(tmp, with) + len_with;
+        orig += len_front + len_rep; // move to next "end of rep"
+    }
+    strcpy(tmp, orig);
+    return size;
+}
+
 EMSCRIPTEN_KEEPALIVE
 int lisp_evaluate(size_t max_heap, const char *library, const char *input, char *output)
 {
@@ -223,6 +265,12 @@ int lisp_evaluate(size_t max_heap, const char *library, const char *input, char 
         memcpy(json_buf_states, "[]", 3);
         sprintf(json_buf_err, json_mask_err, "Heap must be at least 2000 bytes", 0);
     }
+
+    char json_buf_err_tmp[sizeof(json_buf_err)] = {0};
+    memcpy(json_buf_err_tmp, json_buf_err, sizeof(json_buf_err_tmp));
+    int size = str_replace(json_buf_err, sizeof(json_buf_err), json_buf_err_tmp, "\\", "\\\\");
+    if (size < 0)
+        sprintf(json_buf_err, json_mask_err, "Internal error, contact the developers", 0);
 
     int output_size = sprintf(output, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, library, time_taken);
 
