@@ -34,6 +34,7 @@ wasm:
 		-s WASM=1 \
 		-s EXPORTED_FUNCTIONS='["_malloc", "_free"]' \
 		-s ASYNCIFY \
+		-s INITIAL_MEMORY=32MB \
 		-s 'ASYNCIFY_IMPORTS=["js_handle_lisp"]' \
 		-s EXTRA_EXPORTED_RUNTIME_METHODS='["cwrap", "AsciiToString", "writeAsciiToMemory"]' \
 		src/libminilisp.c wasm.c \

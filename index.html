@@ -1,66 +1,118 @@
 <script src="./build/unlisp-local.js"></script>
 <script>
-
-function timeout (ms) {
+  function timeout(ms) {
     return new Promise(resolve => setTimeout(resolve, ms))
-}
+  }
 
-async function asyncLispHandler (value) {
+  async function asyncLispHandler(value) {
     console.log('ASK: ' + value)
     const bool = {
-        '#t': true,
-        '()': false
+      '#t': true,
+      '()': false
     }
     const ask = value.split(' ')
     const fn = ask[0]
+    answer = '()'
     switch (fn) {
-        case 'led':
-            return bool[ask[2]]
-        case 'task':
-            await timeout(ask[2])
-            return ask[3]
-        default:
-            return 0
-    } 
-}
+      case 'led':
+        answer = ask[2]
+        break
+      case 'task':
+        await timeout(ask[2])
+        answer = ask[3]
+        break
+      case 'bclicked':
+        answer = Math.floor(Math.random() * 2) ? '#t' : '()'
+        break
+      default:
+        answer = '()'
+        break
+    }
+    return answer
+  }
 
-Module.onRuntimeInitialized = async _ => {
+  Module.onRuntimeInitialized = async _ => {
     const api = {
-        version: Module.cwrap('version', 'number', []),
-        lisp_evaluate: Module.cwrap('lisp_evaluate', 'number', ['number', 'number', 'number', 'number'], { async: true })
+      version: Module.cwrap('version', 'number', []),
+      lisp_evaluate: Module.cwrap(
+        'lisp_evaluate',
+        'number',
+        ['number', 'number', 'number', 'number'],
+        { async: true }
+      )
     }
 
     console.log(`Uniot lisp version: ${api.version()}`)
 
     const library_ptr = Module._malloc(1024)
     const input_ptr = Module._malloc(1024)
-    const output_ptr = Module._malloc(1024)
+    const output_ptr = Module._malloc(10485760)
+    const handler_out_ptr = Module._malloc(64)
 
     Module.lisp_handler = (value, wakeUp) => {
-        new Promise(async resolve => resolve(await asyncLispHandler(value))).then(wakeUp)
+      new Promise(async resolve => {
+        resolve(await asyncLispHandler(value))
+      }).then(result => {
+        Module.writeAsciiToMemory(result, handler_out_ptr, false)
+        wakeUp(handler_out_ptr)
+      })
     }
 
     let error = false
     let script =
-        '(defun odds (n) (= 1 (% n 2)))\n' +
-        '(defun colors (n) (% n 3))\n' +
-        '(defun odd (n) (= 1 (% n 2)))\n' +
-        '(1 2 3)\n' + // The head of a list must be a function
-        '(color 4)\n' + // Undefined symbol: color
-        '(defun color (n) (% n 3))\n' +
-        '(+ 1 . 2)\n' // Unexpected statement. Evaluation terminated
-    script = '(task -1 500 \'(list (print #t_pass)))'
-    script = '(task 10 500 \'(list (print #t_pass)))'
-    script = '(task 10 500 \'(list (led 0 (= (% #t_pass 2) 1))))'
+      '(defun odds (n) (= 1 (% n 2)))\n' +
+      '(defun colors (n) (% n 3))\n' +
+      '(defun odd (n) (= 1 (% n 2)))\n' +
+      '(1 2 3)\n' + // The head of a list must be a function
+      '(color 4)\n' + // Undefined symbol: color
+      '(defun color (n) (% n 3))\n' +
+      '(+ 1 . 2)\n' // Unexpected statement. Evaluation terminated
+    script = "(task -1 500 '(list (print #t_pass)))"
+    script = "(task 10 500 '(list (print #t_pass)))"
+    script = "(task 10 500 '(list (led 0 (= (% #t_pass 2) 1))))"
+    script =
+      '\n' +
+      '(define a #t)' +
+      '\n' +
+      '(define b ())' +
+      '\n' +
+      "(task 10 100 '" +
+      '\n' +
+      '  (list ' +
+      '\n' +
+      "    (print '---)" +
+      '\n' +
+      '    (setq b (bclicked 0))' +
+      '\n' +
+      "    (print (list 'a= a))" +
+      '\n' +
+      "    (print (list 'b= b))" +
+      '\n' +
+      "    (print (list 'a==b (eq a b )))" +
+      '\n' +
+      '  )' +
+      '\n' +
+      ')'
+
     Module.writeAsciiToMemory(script, input_ptr, false)
-    Module.writeAsciiToMemory('(defjs led (i s))', library_ptr, false)
-    let output_size = await api.lisp_evaluate(4000, library_ptr, input_ptr, output_ptr)
+    Module.writeAsciiToMemory(
+      '(defjs led (i s)) (defjs bclicked (button_id))',
+      library_ptr,
+      false
+    )
+    let output_size = await api.lisp_evaluate(
+      8000,
+      library_ptr,
+      input_ptr,
+      output_ptr,
+      9999
+    )
     if (output_size < 0) {
-        error = true
-        output_size *= -1
+      error = true
+      output_size *= -1
     }
     const result = Module.AsciiToString(output_ptr)
-    
+
     console.log(`Script: ${script}`)
     console.log(`Result:\n${result}`)
     console.log(JSON.parse(result))
@@ -68,6 +120,7 @@ Module.onRuntimeInitialized = async _ => {
 
     Module._free(input_ptr)
     Module._free(output_ptr)
+    Module._free(handler_out_ptr)
 }
 
 </script>

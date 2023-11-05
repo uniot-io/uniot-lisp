@@ -19,32 +19,43 @@
 #include "libminilisp.h"
 #include "emscripten.h"
 
-const char json_mask_result[] = "{ \"out\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total\": %lu }, \"library\": \"%s\", \"time\": %.2g } }";
-const char json_mask_err[] = "{ \"msg\": \"%s\", \"idx\": %d }";
-const char json_mask_state[] = "{ \"ask\": \"%s\", \"answer\": %d }";
+#define BUF_OUT_SIZE    10485760 // 10 MB
+#define BUF_STATES_SIZE (BUF_OUT_SIZE - 2048)
+#define BUF_ERR_SIZE    256
+#define MAX_TASK_ITER   9999
 
-char json_buf_out[102400] = {0};
+const char json_mask_result[] = "{ \"out\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total\": %lu }, \"library\": \"%s\", \"task_limit\": \"%d\", \"time\": %.2g } }";
+const char json_mask_err[] = "{ \"msg\": \"%s\", \"idx\": %d }";
+const char json_mask_state[] = "{ \"ask\": \"%s\", \"answer\": \"%s\" }";
+
+char json_buf_out[BUF_OUT_SIZE] = {0};
 int json_buf_out_idx = 0;
 
-char json_buf_states[102400] = {0};
+char json_buf_states[BUF_STATES_SIZE] = {0};
 int json_buf_states_idx = 0;
 
-char json_buf_err[256] = {0};
+char json_buf_err[BUF_ERR_SIZE] = {0};
 int json_buf_err_idx = 0;
 
 size_t mem_used_init = 0;
 size_t mem_used_by_library = 0;
 size_t mem_used_total = 0;
 
+int global_task_limiter = MAX_TASK_ITER;
+
+void console_log(const char *msg) {
+    EM_ASM({ console.log(UTF8ToString($0)); }, msg);
+}
+
 // param msg must be null-terminated
-EM_JS(int, js_handle_lisp, (const char *msg), {
+EM_JS(const char*, js_handle_lisp, (const char *msg), {
     return Asyncify.handleSleep(wake_up => {
         const value = AsciiToString(msg);
         const lisp_handler = Module.lisp_handler;
         if (lisp_handler && lisp_handler.constructor.name === 'Function') {
             lisp_handler(value, wake_up);
         } else {
-            wake_up(0);
+            wake_up("()");
         }
     });
 })
@@ -64,7 +75,7 @@ void print_out(const char *msg, int size)
 }
 
 // param msg must be null-terminated
-void print_state(const char *msg, int result)
+void print_state(const char *msg, const char *result)
 {
     char buf[SYMBOL_MAX_LEN];
     int size = sprintf(buf, json_mask_state, msg, result);
@@ -72,8 +83,8 @@ void print_state(const char *msg, int result)
     mempush(json_buf_states, &json_buf_states_idx, ",", 1);
 }
 
-int js_handle_state(const char *msg) {
-    int result = js_handle_lisp(msg);
+const char* js_handle_state(const char *msg) {
+    const char *result = js_handle_lisp(msg);
     print_state(msg, result);
     return result;
 }
@@ -98,6 +109,7 @@ static void attach_task(void *root, struct Obj **env, int ms, int times)
 
     if (times > 0)
     {
+        times = times > global_task_limiter ? global_task_limiter : times;
         for (int t = times; t >= 0; --t)
         {
             // TODO: disallow endless loops
@@ -109,7 +121,11 @@ static void attach_task(void *root, struct Obj **env, int ms, int times)
     else
     {
         (*t_pass)->cdr->value = -1;
-        eval(root, env, t_obj);
+        for (int t = global_task_limiter; t >= 0; --t)
+        {
+            eval(root, env, t_obj);
+            js_handle_state_task(times, ms, t);
+        }
     }
 }
 
@@ -142,7 +158,19 @@ static struct Obj *prim_tojs(void *root, struct Obj **env, struct Obj **list)
     buf[size - 1] = 0; // do not display ")"
     char *msg = buf + 1; // do not display "("
 
-    return make_int(root, js_handle_state(msg));
+    const char* result = js_handle_state(msg);
+
+    int int_result = atoi(result);
+    if (int_result == 0 && strcmp(result, "0") != 0) {
+        if (strcmp(result, "#t") == 0) {
+            return True;
+        }
+        if (strcmp(result, "()") == 0) {
+            return Nil;
+        }
+        return make_symbol(root, result);
+    }
+    return make_int(root, int_result);
 }
 
 // (defjs <symbol> (<symbol> ...))
@@ -165,7 +193,7 @@ static bool lisp_shoot_once(size_t max_heap, const char *library, const char *in
 {
     void *root = NULL;
     DEFINE1(env);
-    
+
     lisp_create(max_heap);
 
     *env = make_env(root, &Nil, &Nil);
@@ -235,8 +263,13 @@ int str_replace(char *dest, int dest_size, char *orig, char *rep, char *with)
 }
 
 EMSCRIPTEN_KEEPALIVE
-int lisp_evaluate(size_t max_heap, const char *library, const char *input, char *output)
+int lisp_evaluate(size_t max_heap, const char *library, const char *input, char *output, int task_limiter)
 {
+    if (task_limiter > MAX_TASK_ITER) {
+        task_limiter = MAX_TASK_ITER;
+    }
+    global_task_limiter = task_limiter;
+
     memset(json_buf_out, 0, sizeof(json_buf_out));
     memset(json_buf_states, 0, sizeof(json_buf_states));
     memset(json_buf_err, 0, sizeof(json_buf_err));
@@ -272,7 +305,7 @@ int lisp_evaluate(size_t max_heap, const char *library, const char *input, char 
     if (size < 0)
         sprintf(json_buf_err, json_mask_err, "Internal error, contact the developers", 0);
 
-    int output_size = sprintf(output, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, library, time_taken);
+    int output_size = sprintf(output, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, library, global_task_limiter, time_taken);
 
     int factor = success ? 1 : -1;
     return output_size * factor;
