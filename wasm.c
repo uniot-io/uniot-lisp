@@ -110,6 +110,7 @@ static void attach_task(void *root, struct Obj **env, int ms, int times)
 
     if (times > 0)
     {
+        times -= 1;
         times = times > global_task_limiter ? global_task_limiter : times;
         for (int t = times; t >= 0; --t)
         {
