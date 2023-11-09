@@ -34,6 +34,7 @@
   Module.onRuntimeInitialized = async _ => {
     const api = {
       version: Module.cwrap('version', 'number', []),
+      terminate: Module.cwrap('terminate', null, []),
       lisp_evaluate: Module.cwrap(
         'lisp_evaluate',
         'number',
@@ -76,7 +77,7 @@
       '\n' +
       '(define b ())' +
       '\n' +
-      "(task 10 100 '" +
+      "(task 0 100 '" +
       '\n' +
       '  (list ' +
       '\n' +
@@ -100,6 +101,12 @@
       library_ptr,
       false
     )
+
+    setTimeout(() => {
+      console.log('Terminating...')
+      api.terminate()
+    }, 5000)
+
     let output_size = await api.lisp_evaluate(
       8000,
       library_ptr,

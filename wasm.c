@@ -42,6 +42,7 @@ size_t mem_used_by_library = 0;
 size_t mem_used_total = 0;
 
 int global_task_limiter = MAX_TASK_ITER;
+bool global_task_terminator = false;
 
 void console_log(const char *msg) {
     EM_ASM({ console.log(UTF8ToString($0)); }, msg);
@@ -112,6 +113,9 @@ static void attach_task(void *root, struct Obj **env, int ms, int times)
         times = times > global_task_limiter ? global_task_limiter : times;
         for (int t = times; t >= 0; --t)
         {
+            if (global_task_terminator) {
+                break;
+            }
             // TODO: disallow endless loops
             (*t_pass)->cdr->value = t;
             eval(root, env, t_obj);
@@ -123,6 +127,9 @@ static void attach_task(void *root, struct Obj **env, int ms, int times)
         (*t_pass)->cdr->value = -1;
         for (int t = global_task_limiter; t >= 0; --t)
         {
+            if (global_task_terminator) {
+                break;
+            }
             eval(root, env, t_obj);
             js_handle_state_task(times, ms, t);
         }
@@ -214,12 +221,6 @@ static bool lisp_shoot_once(size_t max_heap, const char *library, const char *in
     return success;
 }
 
-EMSCRIPTEN_KEEPALIVE
-int version()
-{
-    return LIB_VERSION;
-}
-
 int str_replace(char *dest, int dest_size, char *orig, char *rep, char *with)
 {
     int len_rep;   // length of rep (the string to remove)
@@ -263,12 +264,25 @@ int str_replace(char *dest, int dest_size, char *orig, char *rep, char *with)
 }
 
 EMSCRIPTEN_KEEPALIVE
+int version()
+{
+    return LIB_VERSION;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void terminate()
+{
+    global_task_terminator = true;
+}
+
+EMSCRIPTEN_KEEPALIVE
 int lisp_evaluate(size_t max_heap, const char *library, const char *input, char *output, int task_limiter)
 {
     if (task_limiter > MAX_TASK_ITER) {
         task_limiter = MAX_TASK_ITER;
     }
     global_task_limiter = task_limiter;
+    global_task_terminator = false;
 
     memset(json_buf_out, 0, sizeof(json_buf_out));
     memset(json_buf_states, 0, sizeof(json_buf_states));
