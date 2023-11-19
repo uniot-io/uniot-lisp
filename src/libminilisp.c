@@ -1095,16 +1095,24 @@ static Obj *prim_or(void *root, Obj **env, Obj **list) {
     return current_res ? True : Nil;
 }
 
-// (= <integer> <integer>)
+// (= <integer|boolean> <integer|boolean>)
 static Obj *prim_num_eq(void *root, Obj **env, Obj **list) {
     if (length(*list) != 2)
         error("Malformed =");
     Obj *values = eval_list(root, env, list);
     Obj *x = values->car;
     Obj *y = values->cdr->car;
-    if (x->type != TINT || y->type != TINT)
-        error("= takes only numbers");
-    return x->value == y->value ? True : Nil;
+    if ((x->type != TINT && x->type != TTRUE && x->type != TNIL) ||
+        (y->type != TINT && y->type != TTRUE && y->type != TNIL))
+        error("= takes only numbers and booleans");
+
+    if (x->type == TINT && y->type == TINT)
+        return x->value == y->value ? True : Nil;
+
+    int x_bool_val = x->type == TINT ? (x->value == 0 ? 0 : 1) : x->type == TTRUE ? 1 : 0;
+    int y_bool_val = y->type == TINT ? (y->value == 0 ? 0 : 1) : y->type == TTRUE ? 1 : 0;
+
+    return x_bool_val == y_bool_val ? True : Nil;
 }
 
 // (eq expr expr)
