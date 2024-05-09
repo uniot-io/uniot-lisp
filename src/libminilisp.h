@@ -25,8 +25,6 @@ extern "C" {
 
 #define LISP_VERSION 1
 
-#define LISP_MSG_BUF 100
-
 #define SYMBOL_MAX_LEN 200
 
 #define ROOT_END ((void *)-1)
@@ -211,7 +209,7 @@ bool safe_eval(void *root, Obj **env, Obj **expr);
 
 void lisp_set_cycle_yield(yield_def yield);
 
-void lisp_set_printers(print_def out, print_def err);
+void lisp_set_printers(print_def out, print_def log, print_def err);
 
 size_t lisp_mem_used(void);
 

@@ -27,6 +27,7 @@ static bool cycle_in_progress = false;
 
 static yield_def cycle_yield = NULL;
 static print_def print_out = NULL;
+static print_def print_log = NULL;
 static print_def print_err = NULL;
 
 static jmp_buf error_jumper;
@@ -57,9 +58,25 @@ static int printf_to_handler(char* dest, int pos, const char *fmt, ...)
     if (dest) {
         size = pos + vsprintf(dest + pos, fmt, args);
     } else if (print_out) {
-        char buf[LISP_MSG_BUF];
+        char buf[SYMBOL_MAX_LEN];
         size = vsprintf(buf, fmt, args);
         print_out(buf, size);
+    }
+
+    va_end(args);
+
+    return size;
+}
+
+static int log(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int size = 0;
+
+    if (print_log) {
+        char buf[SYMBOL_MAX_LEN];
+        size = vsprintf(buf, fmt, args);
+        print_log(buf, size);
     }
 
     va_end(args);
@@ -70,7 +87,7 @@ static int printf_to_handler(char* dest, int pos, const char *fmt, ...)
 static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 {
     if (print_err) {
-        char buf[LISP_MSG_BUF];
+        char buf[SYMBOL_MAX_LEN];
         int size = vsprintf(buf, fmt, ap);
         print_err(buf, size);
     }
@@ -993,6 +1010,7 @@ static Obj *prim_print(void *root, Obj **env, Obj **list) {
     char buf[SYMBOL_MAX_LEN];
     print_to_buf(buf, 0, *tmp);
     printf_to_handler(NULL, 0, buf);
+    log(buf);
     return Nil;
 }
 
@@ -1273,9 +1291,10 @@ void lisp_set_cycle_yield(yield_def yield)
     cycle_yield = yield;
 }
 
-void lisp_set_printers(print_def out, print_def err)
+void lisp_set_printers(print_def out, print_def log, print_def err)
 {
     print_out = out;
+    print_log = log;
     print_err = err;
 }
 
