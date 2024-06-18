@@ -68,7 +68,7 @@ static int printf_to_handler(char* dest, int pos, const char *fmt, ...)
     return size;
 }
 
-static int log(const char *fmt, ...) {
+static int print_to_log(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     int size = 0;
@@ -1010,7 +1010,7 @@ static Obj *prim_print(void *root, Obj **env, Obj **list) {
     char buf[SYMBOL_MAX_LEN];
     print_to_buf(buf, 0, *tmp);
     printf_to_handler(NULL, 0, buf);
-    log(buf);
+    print_to_log(buf);
     return Nil;
 }
 

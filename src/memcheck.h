@@ -25,6 +25,8 @@
 #define TOP_RESERVE_FACTOR 2
 #elif ESP8266
 #define TOP_RESERVE_FACTOR 2
+#elif ESP32
+#define TOP_RESERVE_FACTOR 2
 #else
 #define TOP_RESERVE_FACTOR 1
 #endif
