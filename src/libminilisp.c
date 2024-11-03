@@ -758,7 +758,11 @@ static Obj *prim_while(void *root, Obj **env, Obj **list) {
         *exprs = (*list)->cdr;
         eval_list(root, env, exprs);
         (*itr)->cdr->value++;
-        // TODO: disallow endless loops
+
+        if ((*itr)->cdr->value > MAX_LOOP_ITERATIONS) {
+            cycle_in_progress = false;
+            error("Maximum loop iterations (%d) exceeded. Possible infinite loop detected.", MAX_LOOP_ITERATIONS);
+        }
 
         if (cycle_yield)
             cycle_yield();

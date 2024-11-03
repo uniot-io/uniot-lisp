@@ -23,9 +23,13 @@
 extern "C" {
 #endif // __cplusplus
 
-#define LISP_VERSION 1
+#define SEMVER_TO_INT(major, minor, patch) ((major * 10000) + (minor * 100) + patch)
+
+#define LISP_VERSION SEMVER_TO_INT(0, 2, 3)
 
 #define SYMBOL_MAX_LEN 200
+
+#define MAX_LOOP_ITERATIONS 9999
 
 #define ROOT_END ((void *)-1)
 
