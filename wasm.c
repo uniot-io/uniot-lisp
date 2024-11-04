@@ -23,6 +23,7 @@
 #define BUF_OUT_SIZE    10485760 // 10 MB
 #define BUF_STATES_SIZE (BUF_OUT_SIZE - 2048)
 #define BUF_ERR_SIZE    512
+#define BUF_LIB_SIZE    2048
 #define MAX_TASK_ITER   9999
 
 const char json_mask_result[] = "{ \"out\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total\": %lu }, \"library\": \"%s\", \"task_limit\": \"%d\", \"time\": %.2g } }";
@@ -37,6 +38,9 @@ int json_buf_states_idx = 0;
 
 char json_buf_err[BUF_ERR_SIZE] = {0};
 int json_buf_err_idx = 0;
+
+char json_buf_lib[BUF_LIB_SIZE] = {0};
+int json_buf_lib_idx = 0;
 
 size_t mem_used_init = 0;
 size_t mem_used_by_library = 0;
@@ -295,7 +299,7 @@ static bool lisp_shoot_once(size_t max_heap, const char *library, const char *in
 EMSCRIPTEN_KEEPALIVE
 int version()
 {
-    return LIB_VERSION;
+    return LISP_VERSION;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -326,6 +330,13 @@ int lisp_evaluate(size_t max_heap, const char *library, const char *input, char 
 
     if (max_heap >= MIN_HEAP_SIZE) {
         do {
+            if (escape_json_string(library, json_buf_lib, sizeof(json_buf_lib)) < 0) {
+                strcpy(json_buf_lib, "");
+                strcpy(json_buf_out, "[]");
+                strcpy(json_buf_states, "[]");
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Failed to escape library", 0);
+                break;
+            }
             if (!mempush(json_buf_out, &json_buf_out_idx, "[", 1, sizeof(json_buf_out))) {
                 strcpy(json_buf_out, "[]");
                 strcpy(json_buf_states, "[]");
@@ -363,13 +374,14 @@ int lisp_evaluate(size_t max_heap, const char *library, const char *input, char 
             }
         } while (0);
     } else {
+        strcpy(json_buf_lib, "");
         strcpy(json_buf_out, "[]");
         strcpy(json_buf_states, "[]");
         snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Heap must be at least 2000 bytes", 0);
     }
 
     // Safely format the final JSON output
-    int output_size = snprintf(output, BUF_OUT_SIZE, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, library, global_task_limiter, time_taken);
+    int output_size = snprintf(output, BUF_OUT_SIZE, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, json_buf_lib, global_task_limiter, time_taken);
     if (output_size < 0 || output_size >= BUF_OUT_SIZE) {
         // Handle output buffer overflow
         return -1;
