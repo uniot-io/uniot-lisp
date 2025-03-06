@@ -26,7 +26,7 @@
 #define BUF_LIB_SIZE    2048
 #define MAX_TASK_ITER   9999
 
-const char json_mask_result[] = "{ \"out\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total\": %lu }, \"library\": \"%s\", \"task_limit\": \"%d\", \"time\": %.2g } }";
+const char json_mask_result[] = "{ \"out\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total_used\": %lu, \"total_available\": %lu }, \"library\": \"%s\", \"task_limit\": %d, \"time\": %.2g } }";
 const char json_mask_err[] = "{ \"msg\": \"%s\", \"idx\": %d }";
 const char json_mask_state[] = "{ \"ask\": \"%s\", \"answer\": \"%s\" }";
 
@@ -381,7 +381,7 @@ int lisp_evaluate(size_t max_heap, const char *library, const char *input, char 
     }
 
     // Safely format the final JSON output
-    int output_size = snprintf(output, BUF_OUT_SIZE, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, json_buf_lib, global_task_limiter, time_taken);
+    int output_size = snprintf(output, BUF_OUT_SIZE, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, max_heap, json_buf_lib, global_task_limiter, time_taken);
     if (output_size < 0 || output_size >= BUF_OUT_SIZE) {
         // Handle output buffer overflow
         return -1;
