@@ -281,10 +281,11 @@ static bool lisp_shoot_once(size_t max_heap, const char *library, const char *in
     define_constants(root, env);
     define_primitives(root, env);
     define_custom_items(root, env);
+    lisp_set_printers(NULL, NULL, NULL);
     lisp_eval(root, env, "(defjs is_event (event)) (defjs pop_event (event)) (defjs push_event (event value))");
 
     mem_used_init = lisp_mem_used();
-    lisp_set_printers(NULL, NULL, NULL);
+    // lisp_set_printers(NULL, NULL, NULL);
     lisp_eval(root, env, library);
     mem_used_by_library = lisp_mem_used();
     lisp_set_printers(print_out, NULL, print_err);

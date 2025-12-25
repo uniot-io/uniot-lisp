@@ -38,7 +38,7 @@ void printErr(const char *msg, int size)
 
 int main()
 {
-  lisp_set_printers(printOut, printErr);
+  lisp_set_printers(printOut, NULL, printErr);
 
   env_constructor[0] = root;
   env_constructor[1] = NULL;
@@ -51,6 +51,8 @@ int main()
   *genv = make_env(root, &Nil, &Nil);
   define_constants(root, genv);
   define_primitives(root, genv);
+  Obj *VERSION = make_int(root, 10204); // Represents the version 1.2.3
+  add_constant(root, genv, "#version", &VERSION);
 
   // lisp_eval(root, genv, "(define a 5) (setq a 1) (print #itr) (print #t) (setq #itr 1)");
   // lisp_eval(root, genv, "(print #itr) (while (< #itr 10) (print #itr)) (print #itr)");
