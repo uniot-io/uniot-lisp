@@ -1,0 +1,93 @@
+name: Build and Release WASM
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'  # Trigger on version tags like 0.2.4
+  workflow_dispatch:  # Allow manual trigger
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.2.4)'
+        required: true
+
+jobs:
+  build-wasm:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 'latest'
+          actions-cache-folder: 'emsdk-cache'
+      
+      - name: Build WASM
+        run: make wasm
+      
+      - name: Verify build artifacts
+        run: |
+          ls -lh build/
+          test -f build/unlisp.js
+          test -f build/unlisp.wasm
+          echo "✅ Build artifacts verified"
+      
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION"
+      
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          release_name: Release ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          body: |
+            WASM build for uniot-lisp ${{ steps.version.outputs.version }}
+            
+            ## Files
+            - `unlisp.wasm` - WebAssembly module (~74KB)
+            - `unlisp.js` - JavaScript loader/wrapper (~21KB)
+            
+            ## Usage
+            Download these files and place them in your project:
+            - `unlisp.wasm` → `static/` directory
+            - `unlisp.js` → `utils/unlisp/` directory
+            
+            ## Installation via script
+            ```bash
+            ./scripts/fetch-wasm.sh ${{ steps.version.outputs.version }}
+            ```
+      
+      - name: Upload unlisp.wasm
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./build/unlisp.wasm
+          asset_name: unlisp.wasm
+          asset_content_type: application/wasm
+      
+      - name: Upload unlisp.js
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./build/unlisp.js
+          asset_name: unlisp.js
+          asset_content_type: application/javascript

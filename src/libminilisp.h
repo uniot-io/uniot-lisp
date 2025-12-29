@@ -25,7 +25,7 @@ extern "C" {
 
 #define SEMVER_TO_INT(major, minor, patch) ((major * 10000) + (minor * 100) + patch)
 
-#define LISP_VERSION SEMVER_TO_INT(0, 2, 3)
+#define LISP_VERSION SEMVER_TO_INT(0, 2, 5)
 
 #define SYMBOL_MAX_LEN 200
 
