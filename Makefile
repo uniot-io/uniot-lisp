@@ -11,7 +11,7 @@ emsdk:
 	(cd ./emsdk && ./emsdk install $(EMSDK_VERSION))
 	(cd ./emsdk && ./emsdk activate $(EMSDK_VERSION))
 
-env: 
+env:
 	$(info RUN THIS COMMAND:)
 	$(info )
 	$(info source ./emsdk/emsdk_env.sh --build=Release)
@@ -41,6 +41,7 @@ wasm:
 		-s INITIAL_MEMORY=32MB \
 		-s 'ASYNCIFY_IMPORTS=["js_handle_lisp"]' \
 		-s EXPORTED_RUNTIME_METHODS='["cwrap", "AsciiToString", "writeAsciiToMemory"]' \
+		--pre-js pre-wasm.js \
 		src/libminilisp.c wasm.c \
 		-o build/unlisp.js
 
