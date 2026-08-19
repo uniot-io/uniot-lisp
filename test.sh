@@ -1,9 +1,11 @@
 #!/bin/bash
 
+FAILURES=0
+
 function fail() {
   echo -n -e '\e[1;31m[ERROR]\e[0m '
   echo "$1"
-  # exit 1
+  FAILURES=$((FAILURES + 1))
 }
 
 function do_run() {
@@ -22,10 +24,13 @@ function do_run() {
 
 function run() {
   echo -n "Testing $1 ... "
+  local before=$FAILURES
   # Run the tests twice to test the garbage collector with different settings.
   MINILISP_ALWAYS_GC= do_run "$@"
   MINILISP_ALWAYS_GC=1 do_run "$@"
-  echo ok
+  if [ "$FAILURES" -eq "$before" ]; then
+    echo ok
+  fi
 }
 
 # Basic data types
@@ -192,3 +197,9 @@ run macroexpand '(if (= x 0) (print x))' "
 
 # Sum from 0 to 10
 run recursion 55 '(defun f (x) (if (= x 0) 0 (+ (f (+ x -1)) x))) (f 10)'
+
+if [ "$FAILURES" -ne 0 ]; then
+  echo -e "\n$FAILURES check(s) failed"
+  exit 1
+fi
+echo -e "\nAll checks passed"

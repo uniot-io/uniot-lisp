@@ -2,7 +2,7 @@ CFLAGS=-std=gnu99 -g -O2 -Wall -I src
 
 VERSION=$$(git rev-list HEAD --count)
 
-.PHONY: clean test
+.PHONY: clean test test-wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -25,6 +25,15 @@ clean:
 
 test: repl
 	@./test.sh
+
+# Sourcing emsdk_env.sh puts the emsdk root on PATH, and that directory contains a
+# `node` subdirectory which shadows the interpreter for PATH lookups. Resolve a regular
+# executable file rather than trusting the first hit.
+NODE ?= $(shell for d in $$(echo $$PATH | tr ':' ' '); do if [ -f "$$d/node" ] && [ -x "$$d/node" ]; then echo "$$d/node"; break; fi; done)
+
+test-wasm: wasm
+	@test -n "$(NODE)" || { echo "node not found in PATH"; exit 1; }
+	@$(NODE) test_wasm.cjs
 
 server:
 	emrun --no_browser --port 8000 .
