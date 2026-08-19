@@ -164,6 +164,10 @@ extern bool gc_running;
 extern bool debug_gc;
 extern bool always_gc;
 
+// Test hook. When set, GC semi-space allocation reports failure without calling
+// malloc, so the out-of-memory recovery path can be exercised deterministically.
+extern bool fail_gc_alloc;
+
 // The size of the heap in byte
 extern size_t MEMORY_SIZE;
 

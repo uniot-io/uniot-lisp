@@ -18,7 +18,6 @@
 
 #include <setjmp.h>
 #include "libminilisp.h"
-#include "memcheck.h"
 
 // TODO: add comments ------------------------------------------------------
 size_t MEMORY_SIZE = 4000; // default value
@@ -97,6 +96,11 @@ static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 void __attribute((noreturn)) error(const char *fmt, ...) {
     cycle_in_progress = false;
 
+    // A longjmp out of gc() would otherwise leave gc_running set forever: the next
+    // collection would trip assert(!gc_running), or, in a build with NDEBUG, would
+    // silently re-enter a half-finished collection.
+    gc_running = false;
+
     va_list ap;
     va_start(ap, fmt);
     vsprintf_error_to_handler(fmt, ap);
@@ -137,6 +141,10 @@ static size_t mem_nused = 0;
 bool gc_running = false;
 bool debug_gc = false;
 bool always_gc = false;
+
+// Test hook. When set, alloc_semispace() reports failure without calling malloc,
+// so the out-of-memory recovery path can be exercised deterministically.
+bool fail_gc_alloc = false;
 
 // Currently we are using Cheney's copying GC algorithm, with which the available memory is split
 // into two halves and all objects are moved from one half to another every time GC is invoked. That
@@ -241,6 +249,8 @@ static inline Obj *forward(Obj *obj) {
 }
 
 static void *alloc_semispace() {
+    if (fail_gc_alloc)
+        return NULL;
     return malloc(MEMORY_SIZE);
 }
 
@@ -259,9 +269,22 @@ void gc(void *root) {
     assert(!gc_running);
     gc_running = true;
 
-    // Allocate a new semi-space.
+    // Allocate a new semi-space. `memory` and `from_space` are left untouched until
+    // the allocation has succeeded, so that a failure leaves the current heap intact
+    // and error() can unwind to safe_eval() with the interpreter still usable.
+    //
+    // This is a copying collector, so a collection needs a second heap of MEMORY_SIZE
+    // bytes in addition to the one already held. On a fragmented heap that request can
+    // fail even when the total free memory looks sufficient, because it must be
+    // contiguous. Before this check, the collector copied into the NULL it got back.
+    void *to_space = alloc_semispace();
+    if (to_space == NULL) {
+        // gc_running is cleared by error() before it unwinds.
+        error("Out of memory: cannot allocate a GC semi-space of %u bytes",
+              (unsigned)MEMORY_SIZE);
+    }
     from_space = memory;
-    memory = alloc_semispace();
+    memory = to_space;
 
     // Initialize the two pointers for GC. Initially they point to the beginning of the to-space.
     scan1 = scan2 = (Obj *)memory;
@@ -294,6 +317,9 @@ void gc(void *root) {
             scan1->up = forward(scan1->up);
             break;
         default:
+            // Not recoverable: roots have been partially forwarded, so unwinding here
+            // leaves the heap inconsistent and leaks from_space. It signals a bug in
+            // the collector rather than a runtime condition.
             error("Bug: copy: unknown type %d", scan1->type);
         }
         scan1 = (Obj *)((uint8_t *)scan1 + scan1->size);
@@ -641,6 +667,30 @@ static Obj *macroexpand(void *root, Obj **env, Obj **obj) {
     *macro = (*bind)->cdr;
     *args = (*obj)->cdr;
     return apply_func(root, env, macro, args);
+}
+
+// True if `p` addresses an object the collector manages, or one of the four
+// statically allocated literals. Used to reject stale or corrupt pointers before
+// they are dereferenced.
+//
+// This replaces an address-ordering heuristic that compared the pointer against the
+// current malloc break. That test rejected perfectly valid objects as soon as a
+// collection placed the heap above the break, and it called malloc()/free() on every
+// single eval. Both bounds here are exact and cost two comparisons.
+static inline bool is_valid_ptr(const void *p) {
+    if (p == NULL)
+        return false;
+
+    const Obj *obj = (const Obj *)p;
+    if (obj >= &literals[0] && obj < &literals[sizeof(literals) / sizeof(literals[0])])
+        return true;
+
+    if (memory == NULL)
+        return false;
+
+    const uint8_t *base = (const uint8_t *)memory;
+    const uint8_t *ptr = (const uint8_t *)p;
+    return ptr >= base && ptr < base + mem_nused;
 }
 
 // Evaluates the S expression.
@@ -1134,8 +1184,12 @@ static Obj *prim_num_eq(void *root, Obj **env, Obj **list) {
     int x_bool_val = x->type == TINT ? (x->value == 0 ? 0 : 1) : x->type == TTRUE ? 1 : 0;
     int y_bool_val = y->type == TINT ? (y->value == 0 ? 0 : 1) : y->type == TTRUE ? 1 : 0;
 
+    // TODO: implement list matching?
+
     return x_bool_val == y_bool_val ? True : Nil;
 }
+
+// TODO: implement null? function for checking if the object is Nil
 
 // (eq expr expr)
 static Obj *prim_eq(void *root, Obj **env, Obj **list) {
@@ -1226,7 +1280,6 @@ void lisp_create(size_t size)
 {
     if (memory == NULL)
     {
-        set_origin_ptr(literals);
         MEMORY_SIZE = size;
         memory = alloc_semispace();
         Symbols = Nil;

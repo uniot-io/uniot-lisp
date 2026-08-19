@@ -36,6 +36,14 @@ void printErr(const char *msg, int size)
   fprintf(stderr, ANSI_COLOR_RED "%s\n" ANSI_COLOR_RESET, msg);
 }
 
+// Set when the variable exists and is not empty, so that `VAR= ./repl` reads as off
+// and `VAR=1 ./repl` reads as on.
+static bool env_flag(const char *name)
+{
+  const char *value = getenv(name);
+  return value != NULL && value[0] != '\0';
+}
+
 int main()
 {
   lisp_set_printers(printOut, NULL, printErr);
@@ -46,7 +54,16 @@ int main()
   root = env_constructor;
   genv = (Obj **)(env_constructor + 1);
 
-  lisp_create(40000);
+  // Overridable so that GC behaviour can be exercised at realistic embedded heap
+  // sizes without building a huge program.
+  const char *heap_env = getenv("MINILISP_HEAP_SIZE");
+  size_t heap_size = (heap_env != NULL && heap_env[0] != '\0') ? (size_t)atoi(heap_env) : 40000;
+  lisp_create(heap_size);
+  if (!lisp_is_created())
+  {
+    fprintf(stderr, "failed to allocate a %u byte heap\n", (unsigned)heap_size);
+    return 1;
+  }
 
   *genv = make_env(root, &Nil, &Nil);
   define_constants(root, genv);
@@ -66,6 +83,13 @@ int main()
   // (defun a () (while (< #itr 10) (print #itr)) (+ 1 1))
   // (defun a (x) (print x) (print (+ x 1)) (list x x x))
   // ((lambda (l x) (while (< #itr x) (setq l (cdr l)) (print l))) (list 1 2 3 4 5) 3)
+
+  // Enabled only once setup is complete: an allocation failure during setup would
+  // unwind through error() before any setjmp() has been established, and setup itself
+  // is not GC-safe (see `VERSION` below, an unrooted Obj* passed to add_constant).
+  always_gc = env_flag("MINILISP_ALWAYS_GC");
+  debug_gc = env_flag("MINILISP_DEBUG_GC");
+  fail_gc_alloc = env_flag("MINILISP_FAIL_GC_ALLOC");
 
   char buf[200];
   char *str = NULL;
