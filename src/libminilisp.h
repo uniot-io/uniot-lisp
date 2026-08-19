@@ -193,7 +193,7 @@ void define_constants(void *root, Obj **env);
 
 void define_primitives(void *root, Obj **env);
 
-int print_to_buf(char *buf, int pos, Obj *obj);
+int print_to_buf(char *buf, size_t size, int pos, Obj *obj);
 
 void print(Obj *obj);
 

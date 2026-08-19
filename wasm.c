@@ -235,8 +235,9 @@ static struct Obj *prim_tojs(void *root, struct Obj **env, struct Obj **list)
     Obj *args = eval_list(root, env, list);
 
     char buf[SYMBOL_MAX_LEN];
-    int size = print_to_buf(buf, 0, args);
-    buf[size - 1] = 0; // do not display ")"
+    int size = print_to_buf(buf, sizeof(buf), 0, args);
+    if (size > 0)
+        buf[size - 1] = 0; // do not display ")"
     char *msg = buf + 1; // do not display "("
 
     const char* result = js_handle_state(msg);

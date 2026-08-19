@@ -31,6 +31,12 @@ static print_def print_err = NULL;
 
 static jmp_buf error_jumper;
 
+// True while a handler installed by lisp_eval() or safe_eval() is live. error() must
+// not longjmp() when this is false: the jmp_buf would be uninitialised, which is
+// undefined behaviour. It showed up as a segfault whenever setup exhausted a heap too
+// small to hold the primitives table.
+static bool error_jumper_valid = false;
+
 static const char *current_buffer = "";
 static size_t current_index = 0;
 
@@ -48,23 +54,55 @@ static int buffer_ungetc(int c)
     return c;
 }
 
-static int printf_to_handler(char* dest, int pos, const char *fmt, ...)
+// Appends formatted output at `pos` in `dest`, which has capacity `size`, and returns
+// the new offset. Output that does not fit is truncated instead of overflowing: the
+// unbounded vsprintf() this replaces smashed the caller's stack whenever a value
+// printed longer than the buffer, which any list of more than a few elements does.
+static int printf_to_handler(char *dest, size_t size, int pos, const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    int size = 0;
+    int written = 0;
 
     if (dest) {
-        size = pos + vsprintf(dest + pos, fmt, args);
+        size_t remaining = (pos >= 0 && (size_t)pos < size) ? size - (size_t)pos : 0;
+        bool truncated = false;
+        int n = 0;
+        if (remaining > 0) {
+            n = vsnprintf(dest + pos, remaining, fmt, args);
+            if (n < 0)
+                n = 0;
+            truncated = ((size_t)n >= remaining);
+        } else {
+            truncated = (size > 0);
+        }
+        written = pos + n;
+        // Clamp so that the next call still writes inside the buffer.
+        if (size > 0 && (size_t)written > size - 1)
+            written = (int)size - 1;
+        // Mark the cut so a shortened value cannot be mistaken for a complete one.
+        // Applied on every truncating call, which is harmless because it is idempotent.
+        if (truncated && size >= 4) {
+            dest[size - 4] = '.';
+            dest[size - 3] = '.';
+            dest[size - 2] = '.';
+            dest[size - 1] = '\0';
+            written = (int)size - 1;
+        }
     } else if (print_out) {
         char buf[SYMBOL_MAX_LEN];
-        size = vsprintf(buf, fmt, args);
-        print_out(buf, size);
+        int n = vsnprintf(buf, sizeof(buf), fmt, args);
+        if (n < 0)
+            n = 0;
+        if ((size_t)n > sizeof(buf) - 1)
+            n = (int)sizeof(buf) - 1;
+        written = n;
+        print_out(buf, written);
     }
 
     va_end(args);
 
-    return size;
+    return written;
 }
 
 static int print_to_log(const char *fmt, ...) {
@@ -74,7 +112,11 @@ static int print_to_log(const char *fmt, ...) {
 
     if (print_log) {
         char buf[SYMBOL_MAX_LEN];
-        size = vsprintf(buf, fmt, args);
+        size = vsnprintf(buf, sizeof(buf), fmt, args);
+        if (size < 0)
+            size = 0;
+        if ((size_t)size > sizeof(buf) - 1)
+            size = (int)sizeof(buf) - 1;
         print_log(buf, size);
     }
 
@@ -86,8 +128,14 @@ static int print_to_log(const char *fmt, ...) {
 static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 {
     if (print_err) {
+        // Reachable from user code, e.g. error("Undefined symbol: %s", name) with a
+        // name approaching SYMBOL_MAX_LEN.
         char buf[SYMBOL_MAX_LEN];
-        int size = vsprintf(buf, fmt, ap);
+        int size = vsnprintf(buf, sizeof(buf), fmt, ap);
+        if (size < 0)
+            size = 0;
+        if ((size_t)size > sizeof(buf) - 1)
+            size = (int)sizeof(buf) - 1;
         print_err(buf, size);
     }
 }
@@ -105,6 +153,10 @@ void __attribute((noreturn)) error(const char *fmt, ...) {
     va_start(ap, fmt);
     vsprintf_error_to_handler(fmt, ap);
     va_end(ap);
+
+    if (!error_jumper_valid)
+        abort();  // nothing can catch this; the message above is all we can report
+
     longjmp(error_jumper, 1);
 }
 
@@ -330,7 +382,7 @@ void gc(void *root) {
     size_t old_nused = mem_nused;
     mem_nused = (size_t)((uint8_t *)scan1 - (uint8_t *)memory);
     if (debug_gc)
-        printf_to_handler(NULL, 0, "GC: %zu bytes out of %zu bytes copied.\n", mem_nused, old_nused);
+        printf_to_handler(NULL, 0, 0, "GC: %zu bytes out of %zu bytes copied.\n", mem_nused, old_nused);
     gc_running = false;
 }
 
@@ -520,28 +572,28 @@ Obj *read_expr(void *root) {
 }
 
 // Prints the given object.
-int print_to_buf(char *buf, int pos, Obj *obj) {
+int print_to_buf(char *buf, size_t size, int pos, Obj *obj) {
     switch (obj->type) {
     case TCELL:
-        pos = printf_to_handler(buf, pos, "(");
+        pos = printf_to_handler(buf, size, pos, "(");
         for (;;) {
-            pos = print_to_buf(buf, pos, obj->car);
+            pos = print_to_buf(buf, size, pos, obj->car);
             if (obj->cdr == Nil)
                 break;
             if (obj->cdr->type != TCELL) {
-                pos = printf_to_handler(buf, pos, " . ");
-                pos = print_to_buf(buf, pos, obj->cdr);
+                pos = printf_to_handler(buf, size, pos, " . ");
+                pos = print_to_buf(buf, size, pos, obj->cdr);
                 break;
             }
-            pos = printf_to_handler(buf, pos, " ");
+            pos = printf_to_handler(buf, size, pos, " ");
             obj = obj->cdr;
         }
-        pos = printf_to_handler(buf, pos, ")");
+        pos = printf_to_handler(buf, size, pos, ")");
         return pos;
 
 #define CASE(type, ...)                                     \
     case type:                                              \
-        return printf_to_handler(buf, pos, __VA_ARGS__);
+        return printf_to_handler(buf, size, pos, __VA_ARGS__);
     CASE(TINT, "%d", obj->value);
     CASE(TSYMBOL, "%s", obj->name);
     CASE(TPRIMITIVE, "<primitive>");
@@ -557,7 +609,7 @@ int print_to_buf(char *buf, int pos, Obj *obj) {
 }
 
 void print(Obj *obj) {
-    print_to_buf(NULL, 0, obj);
+    print_to_buf(NULL, 0, 0, obj);
 }
 
 // Returns the length of the given list. -1 if it's not a proper list.
@@ -1062,9 +1114,9 @@ static Obj *prim_print(void *root, Obj **env, Obj **list) {
         *tmp = eval(root, env, &(*list)->car);
 
     char buf[SYMBOL_MAX_LEN];
-    print_to_buf(buf, 0, *tmp);
-    printf_to_handler(NULL, 0, buf);
-    print_to_log(buf);
+    print_to_buf(buf, sizeof(buf), 0, *tmp);
+    printf_to_handler(NULL, 0, 0, "%s", buf);
+    print_to_log("%s", buf);
     return Nil;
 }
 
@@ -1309,38 +1361,69 @@ bool lisp_eval(void *root, Obj **env, const char *code)
     current_buffer = code;
     current_index = 0;
 
+    // Preserve any handler a caller already installed, so a nested evaluation does not
+    // leave the outer one pointing at a frame that has returned.
+    jmp_buf outer_jumper;
+    const bool outer_valid = error_jumper_valid;
+    if (outer_valid)
+        memcpy(outer_jumper, error_jumper, sizeof(jmp_buf));
+
+    volatile bool result = false;
     DEFINE1(expr);
     while (true)
     {
         if (setjmp(error_jumper) == 0)
         {
+            error_jumper_valid = true;
             *expr = read_expr(root);
-            if (!*expr)
-                return true;
+            if (!*expr) {
+                result = true;
+                break;
+            }
             if (*expr == Cparen)
                 error("Stray close parenthesis");
             if (*expr == Dot)
                 error("Stray dot");
 
             char buf[SYMBOL_MAX_LEN];
-            print_to_buf(buf, 0, eval(root, env, expr));
-            printf_to_handler(NULL, 0, buf);
+            print_to_buf(buf, sizeof(buf), 0, eval(root, env, expr));
+            printf_to_handler(NULL, 0, 0, "%s", buf);
         }
-        else
-            return false;
+        else {
+            result = false;
+            break;
+        }
     }
+
+    error_jumper_valid = outer_valid;
+    if (outer_valid)
+        memcpy(error_jumper, outer_jumper, sizeof(jmp_buf));
+    return result;
 }
 
 bool safe_eval(void *root, Obj **env, Obj **expr)
 {
+    jmp_buf outer_jumper;
+    const bool outer_valid = error_jumper_valid;
+    if (outer_valid)
+        memcpy(outer_jumper, error_jumper, sizeof(jmp_buf));
+
+    volatile bool result;
     if (setjmp(error_jumper) == 0)
     {
+        error_jumper_valid = true;
         char buf[SYMBOL_MAX_LEN];
-        print_to_buf(buf, 0, eval(root, env, expr));
-        printf_to_handler(NULL, 0, buf);
-        return true;
+        print_to_buf(buf, sizeof(buf), 0, eval(root, env, expr));
+        printf_to_handler(NULL, 0, 0, "%s", buf);
+        result = true;
     }
-    return false;
+    else
+        result = false;
+
+    error_jumper_valid = outer_valid;
+    if (outer_valid)
+        memcpy(error_jumper, outer_jumper, sizeof(jmp_buf));
+    return result;
 }
 
 void lisp_set_cycle_yield(yield_def yield)
