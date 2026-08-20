@@ -17,5 +17,13 @@
     "platforms": [
         "espressif8266",
         "espressif32"
-    ]
+    ],
+    "export": {
+        "exclude": [
+            "emsdk",
+            "build",
+            ".pio",
+            "repl"
+        ]
+    }
 }
