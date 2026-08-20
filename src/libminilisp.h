@@ -168,6 +168,11 @@ extern bool always_gc;
 // malloc, so the out-of-memory recovery path can be exercised deterministically.
 extern bool fail_gc_alloc;
 
+// Current eval nesting, and the deepest nesting reached since eval_depth_max was last
+// cleared. Clear eval_depth_max yourself before a measurement and read it afterwards.
+extern int eval_depth;
+extern int eval_depth_max;
+
 // The size of the heap in byte
 extern size_t MEMORY_SIZE;
 

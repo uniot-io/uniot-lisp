@@ -144,6 +144,10 @@ static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 void __attribute((noreturn)) error(const char *fmt, ...) {
     cycle_in_progress = false;
 
+    // A longjmp out of a nested eval() skips its decrements, so the counter has to be
+    // cleared here rather than unwound.
+    eval_depth = 0;
+
     // A longjmp out of gc() would otherwise leave gc_running set forever: the next
     // collection would trip assert(!gc_running), or, in a build with NDEBUG, would
     // silently re-enter a half-finished collection.
@@ -745,8 +749,25 @@ static inline bool is_valid_ptr(const void *p) {
     return ptr >= base && ptr < base + mem_nused;
 }
 
+static Obj *eval_inner(void *root, Obj **env, Obj **obj);
+
+// Current eval nesting, and the deepest nesting reached since eval_depth_max was
+// last cleared. Exposed so a recursion limit can be sized from measurements on the
+// target rather than guessed. eval_depth is reset by error(), because a longjmp out
+// of a nested eval skips the decrements below.
+int eval_depth = 0;
+int eval_depth_max = 0;
+
 // Evaluates the S expression.
 Obj *eval(void *root, Obj **env, Obj **obj) {
+    if (++eval_depth > eval_depth_max)
+        eval_depth_max = eval_depth;
+    Obj *result = eval_inner(root, env, obj);
+    --eval_depth;
+    return result;
+}
+
+static Obj *eval_inner(void *root, Obj **env, Obj **obj) {
     if (!is_valid_ptr(*obj))
         error("Unexpected statement. Evaluation terminated");
 
