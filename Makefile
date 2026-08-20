@@ -17,7 +17,8 @@ env:
 	$(info source ./emsdk/emsdk_env.sh --build=Release)
 	$(info )
 
-repl: src/libminilisp.c repl.c
+repl: repl.c src/libminilisp.c src/libminilisp.h
+	$(CC) $(CFLAGS) -o $@ repl.c src/libminilisp.c
 
 clean:
 	rm -f repl
