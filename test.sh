@@ -33,6 +33,22 @@ function run() {
   fi
 }
 
+# Runs code that is expected to raise, and checks the message.
+#   $1 name, $2 expected substring, $3 code, $4 optional eval depth limit
+function run_error() {
+  echo -n "Testing $1 ... "
+  local before=$FAILURES
+  local out
+  out=$(echo "$3" | MINILISP_MAX_EVAL_DEPTH="${4:-}" ./repl 2>&1 >/dev/null | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
+  if [[ "$out" != *"$2"* ]]; then
+    echo FAILED
+    fail "expected an error containing \"$2\", got \"$out\""
+  fi
+  if [ "$FAILURES" -eq "$before" ]; then
+    echo ok
+  fi
+}
+
 # Basic data types
 run integer 1 1
 run integer -1 -1
@@ -197,6 +213,9 @@ run macroexpand '(if (= x 0) (print x))' "
 
 # Sum from 0 to 10
 run recursion 55 '(defun f (x) (if (= x 0) 0 (+ (f (+ x -1)) x))) (f 10)'
+
+# Recursion guard: deep recursion must raise rather than overrun the C stack.
+run_error "eval depth guard" "Recursion too deep" '(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 50)' 8
 
 if [ "$FAILURES" -ne 0 ]; then
   echo -e "\n$FAILURES check(s) failed"

@@ -758,10 +758,17 @@ static Obj *eval_inner(void *root, Obj **env, Obj **obj);
 int eval_depth = 0;
 int eval_depth_max = 0;
 
+// Nesting cap, taken from lisp_create(). Zero means no limit.
+static int s_max_eval_depth = 0;
+
 // Evaluates the S expression.
 Obj *eval(void *root, Obj **env, Obj **obj) {
     if (++eval_depth > eval_depth_max)
         eval_depth_max = eval_depth;
+    if (s_max_eval_depth > 0 && eval_depth > s_max_eval_depth) {
+        // error() clears eval_depth before unwinding, so no decrement is owed here.
+        error("Recursion too deep: eval nesting exceeded %d", s_max_eval_depth);
+    }
     Obj *result = eval_inner(root, env, obj);
     --eval_depth;
     return result;
@@ -1349,11 +1356,14 @@ void define_primitives(void *root, Obj **env) {
 // Entry point
 //======================================================================
 
-void lisp_create(size_t size)
+void lisp_create(size_t size, int max_eval_depth)
 {
     if (memory == NULL)
     {
         MEMORY_SIZE = size;
+        s_max_eval_depth = max_eval_depth;
+        eval_depth = 0;
+        eval_depth_max = 0;
         memory = alloc_semispace();
         Symbols = Nil;
     }

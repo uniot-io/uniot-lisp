@@ -210,7 +210,15 @@ void add_constant_int(void *root, Obj **env, const char *name, int value);
 
 Obj *get_variable(void *root, Obj **env, const char *name);
 
-void lisp_create(size_t size);
+// Creates the interpreter.
+//
+// `size` is the heap in bytes. `max_eval_depth` caps the nesting of eval(): recursion
+// runs on the C stack, and overrunning it crashes the host instead of raising an error,
+// so the depth is checked rather than discovered. Pass 0 for no limit.
+//
+// One level costs 168 bytes on an ESP8266 and 184 on an ESP32-C3, measured on target.
+// A host with a large stack can pass a generous value; an embedded host should measure.
+void lisp_create(size_t size, int max_eval_depth);
 
 void lisp_destroy(void);
 

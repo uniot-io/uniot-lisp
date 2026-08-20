@@ -38,7 +38,7 @@
       lisp_evaluate: Module.cwrap(
         'lisp_evaluate',
         'number',
-        ['number', 'number', 'number', 'number'],
+        ['number', 'number', 'number', 'number', 'number', 'number'],
         { async: true }
       )
     }
@@ -109,6 +109,7 @@
 
     let output_size = await api.lisp_evaluate(
       8000,
+      16, // eval nesting limit; 16 matches an ESP8266, 32 an ESP32, 0 lifts it
       library_ptr,
       input_ptr,
       output_ptr,

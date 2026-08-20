@@ -23,6 +23,8 @@ const RED = '\x1b[1;31m'
 const RESET = '\x1b[0m'
 const HEAP = 8000
 const TASK_LIMIT = 200
+// Matches an ESP8266, the tightest real target.
+const EVAL_DEPTH = 16
 
 let failures = 0
 
@@ -45,7 +47,7 @@ Module.onRuntimeInitialized = async () => {
     lisp_evaluate: Module.cwrap(
       'lisp_evaluate',
       'number',
-      ['number', 'number', 'number', 'number'],
+      ['number', 'number', 'number', 'number', 'number', 'number'],
       { async: true }
     )
   }
@@ -64,7 +66,7 @@ Module.onRuntimeInitialized = async () => {
   async function evaluate(script, library = '(defjs led (i s))') {
     Module.writeAsciiToMemory(script, input_ptr, false)
     Module.writeAsciiToMemory(library, library_ptr, false)
-    const size = await api.lisp_evaluate(HEAP, library_ptr, input_ptr, output_ptr, TASK_LIMIT)
+    const size = await api.lisp_evaluate(HEAP, EVAL_DEPTH, library_ptr, input_ptr, output_ptr, TASK_LIMIT)
     const raw = Module.AsciiToString(output_ptr)
     let json = null
     try {
@@ -115,6 +117,24 @@ Module.onRuntimeInitialized = async () => {
     r.json && r.json.err && typeof r.json.err.msg === 'string' &&
     r.json.err.msg.includes(longName) && r.size < 0,
     `expected an error naming the symbol and a negative size, got size=${r.size} ${r.raw}`)
+
+  // The emulator reports what a script actually cost, so the editor can warn before a
+  // script is pushed to hardware.
+  r = await evaluate('(+ 1 2)')
+  check('meta reports eval depth',
+    r.json && r.json.meta && r.json.meta.eval &&
+    typeof r.json.meta.eval.depth_max === 'number' &&
+    r.json.meta.eval.depth_max > 0 &&
+    r.json.meta.eval.depth_limit === EVAL_DEPTH,
+    `expected meta.eval with a positive depth_max and depth_limit ${EVAL_DEPTH}, got ${r.raw}`)
+
+  // The caller asks for an ESP8266-sized limit, so recursion that would overrun that
+  // device is refused here too rather than appearing to work in the browser.
+  r = await evaluate('(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 30)')
+  check('emulated ESP8266 recursion limit',
+    r.json && r.json.err && typeof r.json.err.msg === 'string' &&
+    r.json.err.msg.includes('Recursion too deep'),
+    `expected a recursion error, got ${r.raw}`)
 
   // The module must still evaluate after the failures above.
   r = await evaluate('(+ 20 22)')
