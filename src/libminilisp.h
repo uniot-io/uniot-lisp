@@ -173,6 +173,15 @@ extern bool fail_gc_alloc;
 extern int eval_depth;
 extern int eval_depth_max;
 
+// Garbage collection strategy. Copying is the only implementation today; the selector
+// exists so that another can be added without disturbing anything that calls into the
+// interpreter. Override it with a build flag.
+#define MINILISP_GC_COPYING 1
+
+#ifndef MINILISP_GC
+#define MINILISP_GC MINILISP_GC_COPYING
+#endif
+
 // The size of the heap in byte
 extern size_t MEMORY_SIZE;
 

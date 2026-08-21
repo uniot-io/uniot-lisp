@@ -184,15 +184,6 @@ static Obj *Symbols;
 // Memory management
 //======================================================================
 
-// The pointer pointing to the beginning of the current heap
-static void *memory = NULL;
-
-// The pointer pointing to the beginning of the old heap
-static void *from_space = NULL;
-
-// The number of bytes allocated from the heap
-static size_t mem_nused = 0;
-
 // Flags to debug GC
 bool gc_running = false;
 bool debug_gc = false;
@@ -202,13 +193,32 @@ bool always_gc = false;
 // so the out-of-memory recovery path can be exercised deterministically.
 bool fail_gc_alloc = false;
 
-// Currently we are using Cheney's copying GC algorithm, with which the available memory is split
-// into two halves and all objects are moved from one half to another every time GC is invoked. That
-// means the address of the object keeps changing. If you take the address of an object and keep it
-// in a C variable, dereferencing it could cause SEGV because the address becomes invalid after GC
-// runs.
+// True once a heap has been created and not yet destroyed.
+static bool s_heap_created = false;
+
+//======================================================================
+// Garbage collector: strategy interface
+//======================================================================
 //
-// In order to deal with that, all access from C to Lisp objects will go through two levels of
+// Everything outside the strategy section reaches the collector through these. To add
+// a strategy, implement all six below the selector and leave the rest of the file
+// untouched.
+//
+//   gc_heap_create()      allocate the heap sized by MEMORY_SIZE; false on failure
+//   gc_heap_destroy()     release it and reset the strategy's own state
+//   gc_alloc_raw(root, n) n bytes of object storage, collecting first if required,
+//                         raising "Memory exhausted" if it cannot be satisfied
+//   gc(root)              force a collection (declared in libminilisp.h)
+//   gc_mem_used()         bytes currently held by live objects
+//   gc_owns(p)            true if p addresses storage this collector manages
+//
+static bool gc_heap_create(void);
+static void gc_heap_destroy(void);
+static Obj *gc_alloc_raw(void *root, size_t size);
+static size_t gc_mem_used(void);
+static bool gc_owns(const void *p);
+
+// Access from C to Lisp objects goes through two levels of
 // pointer dereferences. The C local variable is pointing to a pointer on the C stack, and the
 // pointer is pointing to the Lisp object. GC is aware of the pointers in the stack and updates
 // their contents with the objects' new addresses when GC happens.
@@ -241,35 +251,31 @@ static Obj *alloc(void *root, int type, size_t size) {
     // boundary as the pointer.
     size = roundup(size, sizeof(void *));
 
-    // If the debug flag is on, allocate a new memory space to force all the existing objects to
-    // move to new addresses, to invalidate the old addresses. By doing this the GC behavior becomes
-    // more predictable and repeatable. If there's a memory bug that the C variable has a direct
-    // reference to a Lisp object, the pointer will become invalid by this GC call. Dereferencing
-    // that will immediately cause SEGV.
-    if (always_gc && !gc_running)
-        gc(root);
-
-    // Otherwise, run GC only when the available memory is not large enough.
-    if (!always_gc && MEMORY_SIZE < mem_nused + size)
-        gc(root);
-
-    // Terminate the program if we couldn't satisfy the memory request. This can happen if the
-    // requested size was too large or the from-space was filled with too many live objects.
-    if (MEMORY_SIZE < mem_nused + size)
-        error("Memory exhausted");
-
-    // Allocate the object.
-    Obj *obj = (Obj *)((char *)memory + mem_nused);
+    Obj *obj = gc_alloc_raw(root, size);
     obj->type = type;
     obj->size = size;
     obj->constant = false;
-    mem_nused += size;
     return obj;
 }
 
 //======================================================================
-// Garbage collector
+// Garbage collector: copying (Cheney)
 //======================================================================
+#if MINILISP_GC == MINILISP_GC_COPYING
+
+// The available memory is split into two halves and all objects are moved from one half to another
+// every time GC is invoked. That means the address of the object keeps changing, which is why every
+// reference from C has to live in the root chain rather than in a bare local.
+
+// The pointer pointing to the beginning of the current heap
+static void *memory = NULL;
+
+// The pointer pointing to the beginning of the old heap
+static void *from_space = NULL;
+
+// The number of bytes allocated from the heap
+static size_t mem_nused = 0;
+
 // Cheney's algorithm uses two pointers to keep track of GC status. At first both pointers point to
 // the beginning of the to-space. As GC progresses, they are moved towards the end of the
 // to-space. The objects before "scan1" are the objects that are fully copied. The objects between
@@ -389,6 +395,59 @@ void gc(void *root) {
         printf_to_handler(NULL, 0, 0, "GC: %zu bytes out of %zu bytes copied.\n", mem_nused, old_nused);
     gc_running = false;
 }
+
+//----------------------------------------------------------------------
+// Strategy interface
+//----------------------------------------------------------------------
+
+static bool gc_heap_create(void) {
+    memory = alloc_semispace();
+    mem_nused = 0;
+    return memory != NULL;
+}
+
+static void gc_heap_destroy(void) {
+    free(memory);
+    memory = NULL;
+    from_space = NULL;
+    mem_nused = 0;
+}
+
+static Obj *gc_alloc_raw(void *root, size_t size) {
+    // With the debug flag on, collect before every allocation so that every object moves and any
+    // stale C-side pointer is caught immediately rather than by luck.
+    if (always_gc && !gc_running)
+        gc(root);
+
+    // Otherwise collect only when the remaining space is not large enough.
+    if (!always_gc && MEMORY_SIZE < mem_nused + size)
+        gc(root);
+
+    // Give up if the request still cannot be satisfied, which happens when it is larger than the
+    // heap or when the from-space held too many live objects.
+    if (MEMORY_SIZE < mem_nused + size)
+        error("Memory exhausted");
+
+    Obj *obj = (Obj *)((char *)memory + mem_nused);
+    mem_nused += size;
+    return obj;
+}
+
+static size_t gc_mem_used(void) {
+    return mem_nused;
+}
+
+static bool gc_owns(const void *p) {
+    if (memory == NULL)
+        return false;
+    const uint8_t *base = (const uint8_t *)memory;
+    const uint8_t *ptr = (const uint8_t *)p;
+    return ptr >= base && ptr < base + mem_nused;
+}
+
+#else
+#error "Unknown MINILISP_GC strategy"
+#endif
 
 //======================================================================
 // Constructors
@@ -741,12 +800,7 @@ static inline bool is_valid_ptr(const void *p) {
     if (obj >= &literals[0] && obj < &literals[sizeof(literals) / sizeof(literals[0])])
         return true;
 
-    if (memory == NULL)
-        return false;
-
-    const uint8_t *base = (const uint8_t *)memory;
-    const uint8_t *ptr = (const uint8_t *)p;
-    return ptr >= base && ptr < base + mem_nused;
+    return gc_owns(p);
 }
 
 static Obj *eval_inner(void *root, Obj **env, Obj **obj);
@@ -1358,33 +1412,34 @@ void define_primitives(void *root, Obj **env) {
 
 void lisp_create(size_t size, int max_eval_depth)
 {
-    if (memory == NULL)
+    if (!s_heap_created)
     {
         MEMORY_SIZE = size;
         s_max_eval_depth = max_eval_depth;
         eval_depth = 0;
         eval_depth_max = 0;
-        memory = alloc_semispace();
-        Symbols = Nil;
+        if (gc_heap_create())
+        {
+            s_heap_created = true;
+            Symbols = Nil;
+        }
     }
 }
 
 void lisp_destroy(void)
 {
-    if (memory != NULL)
+    if (s_heap_created)
     {
-        free(memory);
-        memory = NULL;
-        from_space = NULL;
+        gc_heap_destroy();
+        s_heap_created = false;
         gc_running = false;
-        mem_nused = 0;
         current_index = 0;
     }
 }
 
 bool lisp_is_created()
 {
-    return memory != NULL;
+    return s_heap_created;
 }
 
 bool lisp_eval(void *root, Obj **env, const char *code)
@@ -1470,7 +1525,7 @@ void lisp_set_printers(print_def out, print_def log, print_def err)
 }
 
 size_t lisp_mem_used(void) {
-    return mem_nused;
+    return gc_mem_used();
 }
 
 int lisp_error_idx(void)
