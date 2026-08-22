@@ -17,8 +17,9 @@ env:
 	$(info source ./emsdk/emsdk_env.sh --build=Release)
 	$(info )
 
+# The REPL is the test harness, so it is built with the heap verifier compiled in.
 repl: repl.c src/libminilisp.c src/libminilisp.h
-	$(CC) $(CFLAGS) -o $@ repl.c src/libminilisp.c
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ repl.c src/libminilisp.c
 
 clean:
 	rm -f repl

@@ -159,14 +159,36 @@ extern Obj *Nil;
 extern Obj *Dot;
 extern Obj *Cparen;
 
-// Flags to debug GC
+// True while a collection is in progress.
 extern bool gc_running;
-extern bool debug_gc;
+
+// When set, a collection runs before every allocation, so that every object moves and a
+// stale reference from C is caught at once rather than by luck.
 extern bool always_gc;
 
-// Test hook. When set, GC semi-space allocation reports failure without calling
-// malloc, so the out-of-memory recovery path can be exercised deterministically.
+// Diagnostics for working on the collector: a log line per collection, an allocation
+// failure hook, heap verification after every collection, and the interpreter's internal
+// invariant checks.
+//
+// Compiled out by default. A device pays for them permanently, and they are wanted only
+// while chasing a bug in the collector or in a host's primitives, which is bench work.
+// Build with -D MINILISP_GC_DEBUG=1 to include them; the REPL already does.
+#ifndef MINILISP_GC_DEBUG
+#define MINILISP_GC_DEBUG 0
+#endif
+
+#if MINILISP_GC_DEBUG
+// Logs a line for each collection.
+extern bool debug_gc;
+
+// When set, heap allocation reports failure without calling malloc, so the out-of-memory
+// recovery path can be exercised deterministically.
 extern bool fail_gc_alloc;
+
+// When set, the heap is walked after every collection and any broken invariant stops the
+// program. Combine with always_gc to check the whole heap after every allocation.
+extern bool verify_gc;
+#endif
 
 // Current eval nesting, and the deepest nesting reached since eval_depth_max was last
 // cleared. Clear eval_depth_max yourself before a measurement and read it afterwards.

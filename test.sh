@@ -214,6 +214,28 @@ run macroexpand '(if (= x 0) (print x))' "
 # Sum from 0 to 10
 run recursion 55 '(defun f (x) (if (= x 0) 0 (+ (f (+ x -1)) x))) (f 10)'
 
+# The collector must actually reclaim. Nothing else in this file would notice a
+# collector that faithfully preserves every object and frees nothing: the answers stay
+# correct and the heap is never pushed hard enough to exhaust. Measured headroom after
+# collection is ~120 bytes; a collector that reclaimed nothing would sit ~9 KB above.
+run gc-reclaims '#t' "
+  (define i 0)
+  (define junk ())
+  (define base (mem))
+  (while (< i 30) (setq junk (list 1 2 3 4 5)) (setq i (+ i 1)))
+  (setq junk ())
+  (gc)
+  (< (mem) (+ base 1000))"
+
+# Live data must come through repeated collections intact, which catches both premature
+# collection and a corrupted copy.
+run gc-survives '(1 2 3 4 5)' "
+  (define keep (list 1 2 3 4 5))
+  (gc)
+  (gc)
+  (gc)
+  keep"
+
 # Recursion guard: deep recursion must raise rather than overrun the C stack.
 run_error "eval depth guard" "Recursion too deep" '(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 50)' 8
 

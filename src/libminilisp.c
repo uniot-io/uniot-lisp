@@ -19,6 +19,16 @@
 #include <setjmp.h>
 #include "libminilisp.h"
 
+// The interpreter's own invariant checks. A failed assert() on an ESP calls abort(),
+// which panics and reboots the device before anything can be reported, so these are
+// present only in a diagnostic build. A local macro rather than NDEBUG keeps that
+// decision from silencing asserts in every other library in the link.
+#if MINILISP_GC_DEBUG
+#define LISP_ASSERT(cond) assert(cond)
+#else
+#define LISP_ASSERT(cond) ((void)0)
+#endif
+
 // TODO: add comments ------------------------------------------------------
 size_t MEMORY_SIZE = 4000; // default value
 
@@ -186,12 +196,20 @@ static Obj *Symbols;
 
 // Flags to debug GC
 bool gc_running = false;
-bool debug_gc = false;
 bool always_gc = false;
+
+#if MINILISP_GC_DEBUG
+// Logs a line for each collection.
+bool debug_gc = false;
 
 // Test hook. When set, alloc_semispace() reports failure without calling malloc,
 // so the out-of-memory recovery path can be exercised deterministically.
 bool fail_gc_alloc = false;
+
+// When set, the heap is walked after every collection and any broken invariant stops
+// the program. Combine with always_gc to check the whole heap after every allocation.
+bool verify_gc = false;
+#endif
 
 // True once a heap has been created and not yet destroyed.
 static bool s_heap_created = false;
@@ -211,12 +229,17 @@ static bool s_heap_created = false;
 //   gc(root)              force a collection (declared in libminilisp.h)
 //   gc_mem_used()         bytes currently held by live objects
 //   gc_owns(p)            true if p addresses storage this collector manages
+//   gc_verify(root)       walk the heap and stop on a broken invariant, present only
+//                         when MINILISP_GC_DEBUG is set
 //
 static bool gc_heap_create(void);
 static void gc_heap_destroy(void);
 static Obj *gc_alloc_raw(void *root, size_t size);
 static size_t gc_mem_used(void);
 static bool gc_owns(const void *p);
+#if MINILISP_GC_DEBUG
+static void gc_verify(void *root);
+#endif
 
 // Access from C to Lisp objects goes through two levels of
 // pointer dereferences. The C local variable is pointing to a pointer on the C stack, and the
@@ -311,8 +334,10 @@ static inline Obj *forward(Obj *obj) {
 }
 
 static void *alloc_semispace() {
+#if MINILISP_GC_DEBUG
     if (fail_gc_alloc)
         return NULL;
+#endif
     return malloc(MEMORY_SIZE);
 }
 
@@ -328,7 +353,7 @@ static void forward_root_objects(void *root) {
 // Implements Cheney's copying garbage collection algorithm.
 // http://en.wikipedia.org/wiki/Cheney%27s_algorithm
 void gc(void *root) {
-    assert(!gc_running);
+    LISP_ASSERT(!gc_running);
     gc_running = true;
 
     // Allocate a new semi-space. `memory` and `from_space` are left untouched until
@@ -389,11 +414,19 @@ void gc(void *root) {
 
     // Finish up GC.
     free(from_space);
-    size_t old_nused = mem_nused;
-    mem_nused = (size_t)((uint8_t *)scan1 - (uint8_t *)memory);
+    const size_t live = (size_t)((uint8_t *)scan1 - (uint8_t *)memory);
+#if MINILISP_GC_DEBUG
+    // mem_nused still holds the pre-collection figure at this point.
     if (debug_gc)
-        printf_to_handler(NULL, 0, 0, "GC: %zu bytes out of %zu bytes copied.\n", mem_nused, old_nused);
+        printf_to_handler(NULL, 0, 0, "GC: %zu bytes out of %zu bytes copied.\n", live, mem_nused);
+#endif
+    mem_nused = live;
     gc_running = false;
+
+#if MINILISP_GC_DEBUG
+    if (verify_gc)
+        gc_verify(root);
+#endif
 }
 
 //----------------------------------------------------------------------
@@ -445,6 +478,102 @@ static bool gc_owns(const void *p) {
     return ptr >= base && ptr < base + mem_nused;
 }
 
+//----------------------------------------------------------------------
+// Heap verification
+//----------------------------------------------------------------------
+#if MINILISP_GC_DEBUG
+
+// A heap that fails verification cannot be used, so this reports and stops rather than
+// raising a catchable error.
+static void gc_verify_fail(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsprintf_error_to_handler(fmt, ap);
+    va_end(ap);
+    abort();
+}
+
+static bool gc_verify_type_known(unsigned char type) {
+    return type >= TINT && type <= TCPAREN;
+}
+
+// Every reference held by a live object must address either managed storage or one of
+// the statically allocated literals. A reference pointing anywhere else survived a
+// collection without being updated, which is the failure a copying collector is prone
+// to. NULL is tolerated: the root macros zero their slots before they are filled.
+static void gc_verify_ref(const Obj *ref, const char *field, size_t offset) {
+    if (ref == NULL)
+        return;
+    if (ref >= &literals[0] && ref < &literals[sizeof(literals) / sizeof(literals[0])])
+        return;
+    if (gc_owns(ref))
+        return;
+    gc_verify_fail("GC verify: %s of the object at offset %u points outside the heap",
+                   field, (unsigned)offset);
+}
+
+static void gc_verify(void *root) {
+    const uint8_t *base = (const uint8_t *)memory;
+    const uint8_t *end = base + mem_nused;
+    const uint8_t *p = base;
+    size_t counted = 0;
+
+    while (p < end) {
+        const Obj *obj = (const Obj *)p;
+        const size_t offset = (size_t)(p - base);
+
+        if (!gc_verify_type_known(obj->type))
+            gc_verify_fail("GC verify: unknown type %d at offset %u", obj->type, (unsigned)offset);
+        if (obj->type == TMOVED)
+            gc_verify_fail("GC verify: forwarding tombstone left live at offset %u", (unsigned)offset);
+        if (obj->type >= TTRUE)
+            gc_verify_fail("GC verify: statically allocated type %d found in the heap at offset %u",
+                           obj->type, (unsigned)offset);
+        if (obj->size <= 0 || (size_t)obj->size < offsetof(Obj, value))
+            gc_verify_fail("GC verify: implausible size %d at offset %u", obj->size, (unsigned)offset);
+        if ((size_t)obj->size % sizeof(void *) != 0)
+            gc_verify_fail("GC verify: misaligned size %d at offset %u", obj->size, (unsigned)offset);
+        if (p + obj->size > end)
+            gc_verify_fail("GC verify: the object at offset %u runs past the end of the heap",
+                           (unsigned)offset);
+
+        switch (obj->type) {
+        case TCELL:
+            gc_verify_ref(obj->car, "car", offset);
+            gc_verify_ref(obj->cdr, "cdr", offset);
+            break;
+        case TFUNCTION:
+        case TMACRO:
+            gc_verify_ref(obj->params, "params", offset);
+            gc_verify_ref(obj->body, "body", offset);
+            gc_verify_ref(obj->env, "env", offset);
+            break;
+        case TENV:
+            gc_verify_ref(obj->vars, "vars", offset);
+            gc_verify_ref(obj->up, "up", offset);
+            break;
+        default:
+            break;
+        }
+
+        counted += (size_t)obj->size;
+        p += obj->size;
+    }
+
+    if (counted != mem_nused)
+        gc_verify_fail("GC verify: live objects total %u bytes but mem_nused is %u",
+                       (unsigned)counted, (unsigned)mem_nused);
+
+    // The roots are what the collection was driven from, so a stale one here means an
+    // object was reached but never updated.
+    for (void **frame = (void **)root; frame; frame = *(void ***)frame)
+        for (int i = 1; frame[i] != ROOT_END; i++)
+            gc_verify_ref((const Obj *)frame[i], "root slot", 0);
+
+    gc_verify_ref(Symbols, "the symbol table", 0);
+}
+#endif  // MINILISP_GC_DEBUG
+
 #else
 #error "Unknown MINILISP_GC strategy"
 #endif
@@ -480,7 +609,7 @@ static Obj *make_primitive(void *root, Primitive *fn) {
 }
 
 static Obj *make_function(void *root, Obj **env, int type, Obj **params, Obj **body) {
-    assert(type == TFUNCTION || type == TMACRO);
+    LISP_ASSERT(type == TFUNCTION || type == TMACRO);
     Obj *r = alloc(root, type, sizeof(Obj *) * 3);
     r->params = *params;
     r->body = *body;

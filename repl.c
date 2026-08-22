@@ -44,6 +44,22 @@ static bool env_flag(const char *name)
   return value != NULL && value[0] != '\0';
 }
 
+// Test hooks, present only in the REPL. They let the suite assert what a collection
+// actually does, which behavioural tests cannot observe.
+
+// (mem) -> bytes currently held by live objects.
+static Obj *prim_mem(void *root, Obj **env, Obj **list)
+{
+  return make_int(root, (int)lisp_mem_used());
+}
+
+// (gc) -> collect now, so a test can measure what was reclaimed.
+static Obj *prim_gc(void *root, Obj **env, Obj **list)
+{
+  gc(root);
+  return Nil;
+}
+
 int main()
 {
   lisp_set_printers(printOut, NULL, printErr);
@@ -73,6 +89,9 @@ int main()
   *genv = make_env(root, &Nil, &Nil);
   define_constants(root, genv);
   define_primitives(root, genv);
+  add_primitive(root, genv, "mem", prim_mem);
+  add_primitive(root, genv, "gc", prim_gc);
+
   Obj *VERSION = make_int(root, 10204); // Represents the version 1.2.3
   add_constant(root, genv, "#version", &VERSION);
 
@@ -93,8 +112,15 @@ int main()
   // unwind through error() before any setjmp() has been established, and setup itself
   // is not GC-safe (see `VERSION` below, an unrooted Obj* passed to add_constant).
   always_gc = env_flag("MINILISP_ALWAYS_GC");
+#if MINILISP_GC_DEBUG
   debug_gc = env_flag("MINILISP_DEBUG_GC");
   fail_gc_alloc = env_flag("MINILISP_FAIL_GC_ALLOC");
+  verify_gc = env_flag("MINILISP_VERIFY_GC");
+#else
+  if (env_flag("MINILISP_DEBUG_GC") || env_flag("MINILISP_FAIL_GC_ALLOC") ||
+      env_flag("MINILISP_VERIFY_GC"))
+    fprintf(stderr, "GC diagnostics ignored: rebuild with -D MINILISP_GC_DEBUG=1\n");
+#endif
 
   char buf[200];
   char *str = NULL;
