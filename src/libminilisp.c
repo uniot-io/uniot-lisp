@@ -68,6 +68,38 @@ static int buffer_ungetc(int c)
 // the new offset. Output that does not fit is truncated instead of overflowing: the
 // unbounded vsprintf() this replaces smashed the caller's stack whenever a value
 // printed longer than the buffer, which any list of more than a few elements does.
+// Formatting a message needs somewhere to put it, and on this target the stack is the
+// one resource that cannot be spared: a device has four kilobytes of it against forty of
+// heap, and the deepest point of a recursive evaluation is exactly where a message gets
+// formatted, because that is where the recursion guard raises. So these live in static
+// storage instead.
+//
+// Two of them, not one: a value is formatted into the first and then handed to a handler,
+// and a message formatted for a handler must not overwrite the value being reported. They
+// are never in use at the same moment beyond that pairing.
+//
+// This assumes a print handler does not itself evaluate Lisp, and that it consumes what
+// it is given before returning rather than keeping the pointer. Both already hold: the
+// handlers copy the text out and none of them re-enter the interpreter.
+static char s_value_buf[SYMBOL_MAX_LEN];
+static char s_message_buf[SYMBOL_MAX_LEN];
+
+// Hands an already formatted string to a handler. The obvious spelling of this,
+// printf_to_handler(NULL, 0, 0, "%s", buf), copies the string through a second buffer for
+// no reason, and that second buffer used to be 200 bytes of stack in the places where
+// stack is scarcest.
+static void write_out(const char *msg, int len)
+{
+    if (print_out)
+        print_out(msg, len);
+}
+
+static void write_log(const char *msg, int len)
+{
+    if (print_log)
+        print_log(msg, len);
+}
+
 static int printf_to_handler(char *dest, size_t size, int pos, const char *fmt, ...)
 {
     va_list args;
@@ -100,14 +132,13 @@ static int printf_to_handler(char *dest, size_t size, int pos, const char *fmt, 
             written = (int)size - 1;
         }
     } else if (print_out) {
-        char buf[SYMBOL_MAX_LEN];
-        int n = vsnprintf(buf, sizeof(buf), fmt, args);
+        int n = vsnprintf(s_message_buf, sizeof(s_message_buf), fmt, args);
         if (n < 0)
             n = 0;
-        if ((size_t)n > sizeof(buf) - 1)
-            n = (int)sizeof(buf) - 1;
+        if ((size_t)n > sizeof(s_message_buf) - 1)
+            n = (int)sizeof(s_message_buf) - 1;
         written = n;
-        print_out(buf, written);
+        print_out(s_message_buf, written);
     }
 
     va_end(args);
@@ -115,38 +146,17 @@ static int printf_to_handler(char *dest, size_t size, int pos, const char *fmt, 
     return written;
 }
 
-static int print_to_log(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    int size = 0;
-
-    if (print_log) {
-        char buf[SYMBOL_MAX_LEN];
-        size = vsnprintf(buf, sizeof(buf), fmt, args);
-        if (size < 0)
-            size = 0;
-        if ((size_t)size > sizeof(buf) - 1)
-            size = (int)sizeof(buf) - 1;
-        print_log(buf, size);
-    }
-
-    va_end(args);
-
-    return size;
-}
-
 static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 {
     if (print_err) {
         // Reachable from user code, e.g. error("Undefined symbol: %s", name) with a
         // name approaching SYMBOL_MAX_LEN.
-        char buf[SYMBOL_MAX_LEN];
-        int size = vsnprintf(buf, sizeof(buf), fmt, ap);
+        int size = vsnprintf(s_message_buf, sizeof(s_message_buf), fmt, ap);
         if (size < 0)
             size = 0;
-        if ((size_t)size > sizeof(buf) - 1)
-            size = (int)sizeof(buf) - 1;
-        print_err(buf, size);
+        if ((size_t)size > sizeof(s_message_buf) - 1)
+            size = (int)sizeof(s_message_buf) - 1;
+        print_err(s_message_buf, size);
     }
 }
 // TODO: --------------------------------------------------------------------
@@ -1364,7 +1374,11 @@ static int read_number(int val) {
 }
 
 static Obj *read_symbol(void *root, char c) {
-    char buf[SYMBOL_MAX_LEN + 1];
+    // Static for the same reason as the formatting buffers: reading a nested expression
+    // recurses, so this would otherwise be 200 bytes of stack per level of nesting in the
+    // source being read. Nothing re-enters it -- it consumes characters and interns the
+    // result, and interning never reads.
+    static char buf[SYMBOL_MAX_LEN + 1];
     buf[0] = c;
     int len = 1;
     while (isalnum(peek()) || strchr(symbol_chars, peek())) {
@@ -1967,10 +1981,9 @@ static Obj *prim_print(void *root, Obj **env, Obj **list) {
     else
         *tmp = eval(root, env, &(*list)->car);
 
-    char buf[SYMBOL_MAX_LEN];
-    print_to_buf(buf, sizeof(buf), 0, *tmp);
-    printf_to_handler(NULL, 0, 0, "%s", buf);
-    print_to_log("%s", buf);
+    const int len = print_to_buf(s_value_buf, sizeof(s_value_buf), 0, *tmp);
+    write_out(s_value_buf, len);
+    write_log(s_value_buf, len);
     return Nil;
 }
 
@@ -2243,9 +2256,9 @@ bool lisp_eval(void *root, Obj **env, const char *code)
             if (*expr == Dot)
                 error("Stray dot");
 
-            char buf[SYMBOL_MAX_LEN];
-            print_to_buf(buf, sizeof(buf), 0, eval(root, env, expr));
-            printf_to_handler(NULL, 0, 0, "%s", buf);
+            const int len = print_to_buf(s_value_buf, sizeof(s_value_buf), 0,
+                                         eval(root, env, expr));
+            write_out(s_value_buf, len);
         }
         else {
             result = false;
@@ -2270,9 +2283,9 @@ bool safe_eval(void *root, Obj **env, Obj **expr)
     if (setjmp(error_jumper) == 0)
     {
         error_jumper_valid = true;
-        char buf[SYMBOL_MAX_LEN];
-        print_to_buf(buf, sizeof(buf), 0, eval(root, env, expr));
-        printf_to_handler(NULL, 0, 0, "%s", buf);
+        const int len = print_to_buf(s_value_buf, sizeof(s_value_buf), 0,
+                                     eval(root, env, expr));
+        write_out(s_value_buf, len);
         result = true;
     }
     else
