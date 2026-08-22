@@ -2,3 +2,5 @@
 repl
 emsdk
 build
+repl-mark-sweep
+repl-mark-sweep-small

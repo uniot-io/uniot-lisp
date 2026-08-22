@@ -65,6 +65,7 @@ extern "C" {
 
 #include <assert.h>
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -97,6 +98,10 @@ enum
     TNIL,
     TDOT,
     TCPAREN,
+    // The marker for a block of heap that holds no object. Only a collector that leaves
+    // objects where they are has any use for it, so only the mark-sweep strategy sets it.
+    // Seeing it anywhere else means a freed object is still being read.
+    TFREE,
 };
 
 // Typedef for the primitive function
@@ -195,13 +200,30 @@ extern bool verify_gc;
 extern int eval_depth;
 extern int eval_depth_max;
 
-// Garbage collection strategy. Copying is the only implementation today; the selector
-// exists so that another can be added without disturbing anything that calls into the
-// interpreter. Override it with a build flag.
+// Garbage collection strategy. Override it with a build flag.
+//
+//   COPYING     Cheney. Allocation is a pointer bump and collection touches only live
+//               data, but every collection asks the system for a second heap of
+//               MEMORY_SIZE bytes, and objects move, so a reference held anywhere
+//               outside the root chain goes stale.
+//
+//   MARK_SWEEP  Objects never move and a collection needs no memory beyond the heap
+//               itself, which removes the failure a small fragmented device heap is
+//               prone to. In exchange, allocation searches a free list and a collection
+//               walks the whole heap rather than just the live part.
 #define MINILISP_GC_COPYING 1
+#define MINILISP_GC_MARK_SWEEP 2
 
 #ifndef MINILISP_GC
 #define MINILISP_GC MINILISP_GC_COPYING
+#endif
+
+// Depth of the mark-sweep collector's explicit work stack, in entries. Marking may not
+// recurse: the C stack on a device is measured in single-digit kilobytes and a long list
+// would overrun it. Overflow is not an error, only slower -- the collector falls back to
+// rescanning the heap -- so this trades a fixed slab of RAM against collection time.
+#ifndef MINILISP_GC_MARK_STACK
+#define MINILISP_GC_MARK_STACK 64
 #endif
 
 // The size of the heap in byte

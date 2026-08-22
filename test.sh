@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Which interpreter to exercise. The suite is the same for every garbage collection
+# strategy, so `make test-gc` points this at each build in turn.
+REPL="${REPL:-./repl}"
+
 FAILURES=0
 
 function fail() {
@@ -9,13 +13,13 @@ function fail() {
 }
 
 function do_run() {
-  error=$(echo "$3" | ./repl 2>&1 > /dev/null)
+  error=$(echo "$3" | "$REPL" 2>&1 > /dev/null)
   if [ -n "$error" ]; then
     echo FAILED
     fail "$error"
   fi
 
-  result=$(echo "$3" | ./repl 2> /dev/null | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g" | tail -1)
+  result=$(echo "$3" | "$REPL" 2> /dev/null | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g" | tail -1)
   if [ "$result" != "$2" ]; then
     echo FAILED
     fail "$2 expected, but got $result"
@@ -39,7 +43,7 @@ function run_error() {
   echo -n "Testing $1 ... "
   local before=$FAILURES
   local out
-  out=$(echo "$3" | MINILISP_MAX_EVAL_DEPTH="${4:-}" ./repl 2>&1 >/dev/null | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
+  out=$(echo "$3" | MINILISP_MAX_EVAL_DEPTH="${4:-}" "$REPL" 2>&1 >/dev/null | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
   if [[ "$out" != *"$2"* ]]; then
     echo FAILED
     fail "expected an error containing \"$2\", got \"$out\""
@@ -235,6 +239,28 @@ run gc-survives '(1 2 3 4 5)' "
   (gc)
   (gc)
   keep"
+
+# A list whose elements are themselves lists. A collector that walks the heap depth-first
+# has to hold each element aside while it follows the spine, so this is the shape that
+# makes its own bookkeeping grow -- a flat list, or a chain of single-element lists, is
+# walked without remembering anything at all. Sized past the mark-sweep work stack, which
+# needs a larger heap than the rest of the suite runs in, so that the path that recovers
+# from a full work stack is exercised at the default stack size.
+MINILISP_HEAP_SIZE=20000 run gc-branching 149 "
+  (define i 0)
+  (define n ())
+  (while (< i 150) (setq n (cons (list i) n)) (setq i (+ i 1)))
+  (gc)
+  (car (car n))"
+
+# Churn of mixed shapes -- closures, their environments, lists -- rather than the single
+# shape the other tests allocate, followed by real work that has to come out right.
+run gc-churn 55 "
+  (define i 0)
+  (define acc ())
+  (while (< i 40) (setq acc ((lambda (x) (list x (+ x 1) (list x))) i)) (setq i (+ i 1)))
+  (defun f (x) (if (= x 0) 0 (+ (f (+ x -1)) x)))
+  (f 10)"
 
 # Recursion guard: deep recursion must raise rather than overrun the C stack.
 run_error "eval depth guard" "Recursion too deep" '(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 50)' 8

@@ -2,7 +2,7 @@ CFLAGS=-std=gnu99 -g -O2 -Wall -I src
 
 VERSION=$$(git rev-list HEAD --count)
 
-.PHONY: clean test test-wasm
+.PHONY: clean test test-gc test-mark-sweep test-wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -21,12 +21,38 @@ env:
 repl: repl.c src/libminilisp.c src/libminilisp.h
 	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ repl.c src/libminilisp.c
 
+# The same interpreter over the other collector. Everything above the strategy seam is
+# shared, so whatever the suite asks of one has to hold for the other.
+repl-mark-sweep: repl.c src/libminilisp.c src/libminilisp.h
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ repl.c src/libminilisp.c
+
+# The work stack cut to a single entry, so that every collection overflows it and the
+# recovery path runs over and over instead of only being entered once.
+repl-mark-sweep-small: repl.c src/libminilisp.c src/libminilisp.h
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP \
+		-D MINILISP_GC_MARK_STACK=1 -o $@ repl.c src/libminilisp.c
+
 clean:
 	rm -f repl
+	rm -f repl-mark-sweep
+	rm -f repl-mark-sweep-small
 	rm -f build/*
 
 test: repl
 	@./test.sh
+
+test-mark-sweep: repl-mark-sweep
+	@REPL=./repl-mark-sweep ./test.sh
+
+# Every strategy, plainly and with the heap checked after each collection. Running the
+# suite without verification still matters: it is the only way a failure shows up as a
+# wrong answer rather than as an abort, which is what a user would actually see.
+test-gc: repl repl-mark-sweep repl-mark-sweep-small
+	@echo "--- copying ---"                 && ./test.sh
+	@echo "--- copying, verified ---"       && MINILISP_VERIFY_GC=1 ./test.sh
+	@echo "--- mark-sweep ---"              && REPL=./repl-mark-sweep ./test.sh
+	@echo "--- mark-sweep, verified ---"    && MINILISP_VERIFY_GC=1 REPL=./repl-mark-sweep ./test.sh
+	@echo "--- mark-sweep, 1-entry stack ---" && MINILISP_VERIFY_GC=1 REPL=./repl-mark-sweep-small ./test.sh
 
 # Sourcing emsdk_env.sh puts the emsdk root on PATH, and that directory contains a
 # `node` subdirectory which shadows the interpreter for PATH lookups. Resolve a regular
