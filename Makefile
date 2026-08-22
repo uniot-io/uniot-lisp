@@ -2,7 +2,7 @@ CFLAGS=-std=gnu99 -g -O2 -Wall -I src
 
 VERSION=$$(git rev-list HEAD --count)
 
-.PHONY: clean test test-gc test-mark-sweep test-wasm
+.PHONY: bench clean test test-gc test-mark-sweep test-wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -32,7 +32,23 @@ repl-mark-sweep-small: repl.c src/libminilisp.c src/libminilisp.h
 	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP \
 		-D MINILISP_GC_MARK_STACK=1 -o $@ repl.c src/libminilisp.c
 
+# The strategy is fixed when the library is compiled, so comparing two of them takes two
+# binaries. Built without the verifier: it would charge one strategy for work the other
+# does not do, and the point here is the cost of the real thing.
+BENCH_CFLAGS=$(CFLAGS) -D MINILISP_GC_STATS=1
+
+bench-copying: bench.c src/libminilisp.c src/libminilisp.h
+	$(CC) $(BENCH_CFLAGS) -o $@ bench.c src/libminilisp.c
+
+bench-mark-sweep: bench.c src/libminilisp.c src/libminilisp.h
+	$(CC) $(BENCH_CFLAGS) -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ bench.c src/libminilisp.c
+
+bench: bench-copying bench-mark-sweep
+	@./bench.sh
+
 clean:
+	rm -f bench-copying
+	rm -f bench-mark-sweep
 	rm -f repl
 	rm -f repl-mark-sweep
 	rm -f repl-mark-sweep-small

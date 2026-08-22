@@ -195,6 +195,63 @@ extern bool fail_gc_alloc;
 extern bool verify_gc;
 #endif
 
+// Collector instrumentation, for comparing one strategy against another. Compiled out by
+// default: the counters are individually trivial but they sit on the allocation path,
+// which is the hottest path in the interpreter, and a device has no use for them.
+#ifndef MINILISP_GC_STATS
+#define MINILISP_GC_STATS 0
+#endif
+
+#if MINILISP_GC_STATS
+// A monotonic clock, in whatever unit suits the caller. The library has none of its own
+// that is portable across a workstation, a device and a browser, so the caller supplies
+// one. Left NULL, the timing figures stay zero and everything else is still counted.
+typedef uint64_t (*clock_def)(void);
+extern clock_def lisp_stats_clock;
+
+typedef struct {
+    // Work done
+    size_t collections;
+    size_t allocations;
+    size_t alloc_requested;  // bytes alloc() asked the collector for
+    size_t alloc_supplied;   // bytes it actually handed over; the difference is what is
+                             // lost to blocks too small to split, and is always zero for
+                             // a collector that allocates by bumping a pointer
+    size_t traced_bytes;     // live bytes the collector had to handle: copied, by the
+                             // copying collector; marked, by mark-sweep
+    size_t walked_bytes;     // heap bytes stepped over whether live or not. Zero for a
+                             // copying collector, which never looks at dead data; for
+                             // mark-sweep this is the whole heap, once per pass
+
+    // Time, in the clock's units
+    uint64_t gc_time;
+    uint64_t gc_time_max;    // the longest single collection, which is the figure that
+                             // decides whether a collection can be felt
+
+    // Memory
+    size_t live_peak;        // most bytes live at any one time
+    size_t system_now;       // bytes currently held from the system allocator
+    size_t system_peak;      // the most ever held at once. This is where the copying
+                             // collector's second semi-space becomes visible, and it is
+                             // the number that decides whether a heap fits on a device
+
+    // The shape of the free space after the last collection. A collector that compacts
+    // leaves one run; one that does not leaves as many pieces as it leaves.
+    size_t free_blocks;
+    size_t free_largest;
+
+    // Mark-sweep bookkeeping
+    size_t mark_stack_peak;
+    size_t mark_rescues;     // passes over the heap made because the work stack filled
+} LispStats;
+
+extern LispStats lisp_stats;
+
+// Zeroes the counters. The amount currently held from the system is kept, since it
+// describes the heap rather than the work done, and the peak restarts from it.
+void lisp_stats_reset(void);
+#endif
+
 // Current eval nesting, and the deepest nesting reached since eval_depth_max was last
 // cleared. Clear eval_depth_max yourself before a measurement and read it afterwards.
 extern int eval_depth;
@@ -219,11 +276,17 @@ extern int eval_depth_max;
 #endif
 
 // Depth of the mark-sweep collector's explicit work stack, in entries. Marking may not
-// recurse: the C stack on a device is measured in single-digit kilobytes and a long list
-// would overrun it. Overflow is not an error, only slower -- the collector falls back to
-// rescanning the heap -- so this trades a fixed slab of RAM against collection time.
+// recurse: the C stack on a device is measured in single-digit kilobytes and a structure
+// as deep as a long list would overrun it. Overflow is not an error, only slower -- the
+// collector falls back to rescanning the heap -- so this trades a fixed slab of RAM
+// against collection time.
+//
+// 128 comes from measuring rather than guessing. Across the benchmark workloads, 64
+// entries overflowed constantly (24 to 91 rescans of the whole heap in the call-heavy
+// ones) and 128 removed nearly all of them, cutting time spent collecting by about a
+// fifth; 256 bought almost nothing more. At four bytes an entry that is 512 bytes.
 #ifndef MINILISP_GC_MARK_STACK
-#define MINILISP_GC_MARK_STACK 64
+#define MINILISP_GC_MARK_STACK 128
 #endif
 
 // The size of the heap in byte

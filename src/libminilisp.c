@@ -214,6 +214,50 @@ bool verify_gc = false;
 // True once a heap has been created and not yet destroyed.
 static bool s_heap_created = false;
 
+#if MINILISP_GC_STATS
+clock_def lisp_stats_clock = NULL;
+LispStats lisp_stats;
+
+void lisp_stats_reset(void) {
+    const size_t held = lisp_stats.system_now;
+    memset(&lisp_stats, 0, sizeof(lisp_stats));
+    lisp_stats.system_now = held;
+    lisp_stats.system_peak = held;
+}
+
+// Every byte the collector takes from or gives back to the system passes through these,
+// so that the peak is the real high-water mark rather than a figure worked out from the
+// heap size afterwards.
+static void stats_system_add(size_t bytes) {
+    lisp_stats.system_now += bytes;
+    if (lisp_stats.system_now > lisp_stats.system_peak)
+        lisp_stats.system_peak = lisp_stats.system_now;
+}
+
+static void stats_system_sub(size_t bytes) {
+    lisp_stats.system_now -= bytes;
+}
+
+static uint64_t stats_now(void) {
+    return lisp_stats_clock != NULL ? lisp_stats_clock() : 0;
+}
+
+static void stats_add_gc_time(uint64_t started) {
+    if (lisp_stats_clock == NULL)
+        return;
+    const uint64_t elapsed = lisp_stats_clock() - started;
+    lisp_stats.gc_time += elapsed;
+    if (elapsed > lisp_stats.gc_time_max)
+        lisp_stats.gc_time_max = elapsed;
+}
+
+#define STATS_SYSTEM_ADD(n) stats_system_add(n)
+#define STATS_SYSTEM_SUB(n) stats_system_sub(n)
+#else
+#define STATS_SYSTEM_ADD(n) ((void)0)
+#define STATS_SYSTEM_SUB(n) ((void)0)
+#endif
+
 //======================================================================
 // Garbage collector: strategy interface
 //======================================================================
@@ -280,6 +324,18 @@ static Obj *alloc(void *root, int type, size_t size) {
     Obj *obj = gc_alloc_raw(root, size);
     obj->type = type;
     obj->constant = false;
+
+#if MINILISP_GC_STATS
+    lisp_stats.allocations++;
+    lisp_stats.alloc_requested += size;
+    lisp_stats.alloc_supplied += (size_t)obj->size;
+    {
+        const size_t live = gc_mem_used();
+        if (live > lisp_stats.live_peak)
+            lisp_stats.live_peak = live;
+    }
+#endif
+
     return obj;
 }
 
@@ -362,7 +418,10 @@ static void *alloc_semispace() {
     if (fail_gc_alloc)
         return NULL;
 #endif
-    return malloc(MEMORY_SIZE);
+    void *space = malloc(MEMORY_SIZE);
+    if (space != NULL)
+        STATS_SYSTEM_ADD(MEMORY_SIZE);
+    return space;
 }
 
 // Copies the root objects.
@@ -379,6 +438,12 @@ static void forward_root_objects(void *root) {
 void gc(void *root) {
     LISP_ASSERT(!gc_running);
     gc_running = true;
+
+#if MINILISP_GC_STATS
+    // Started here rather than after the allocation below, because obtaining the second
+    // semi-space is part of what a collection costs under this strategy.
+    const uint64_t stats_started = stats_now();
+#endif
 
     // Allocate a new semi-space. `memory` and `from_space` are left untouched until
     // the allocation has succeeded, so that a failure leaves the current heap intact
@@ -438,6 +503,7 @@ void gc(void *root) {
 
     // Finish up GC.
     free(from_space);
+    STATS_SYSTEM_SUB(MEMORY_SIZE);
     const size_t live = (size_t)((uint8_t *)scan1 - (uint8_t *)memory);
 #if MINILISP_GC_DEBUG
     // mem_nused still holds the pre-collection figure at this point.
@@ -446,6 +512,16 @@ void gc(void *root) {
 #endif
     mem_nused = live;
     gc_running = false;
+
+#if MINILISP_GC_STATS
+    lisp_stats.collections++;
+    // Every live byte was physically moved, and no dead byte was looked at.
+    lisp_stats.traced_bytes += live;
+    // Compaction leaves the free space in one run, always.
+    lisp_stats.free_blocks = 1;
+    lisp_stats.free_largest = MEMORY_SIZE - live;
+    stats_add_gc_time(stats_started);
+#endif
 
 #if MINILISP_GC_DEBUG
     if (verify_gc)
@@ -464,6 +540,8 @@ static bool gc_heap_create(void) {
 }
 
 static void gc_heap_destroy(void) {
+    if (memory != NULL)
+        STATS_SYSTEM_SUB(MEMORY_SIZE);
     free(memory);
     memory = NULL;
     from_space = NULL;
@@ -481,9 +559,11 @@ static Obj *gc_alloc_raw(void *root, size_t size) {
         gc(root);
 
     // Give up if the request still cannot be satisfied, which happens when it is larger than the
-    // heap or when the from-space held too many live objects.
+    // heap or when the from-space held too many live objects. This collector compacts, so what
+    // is free is one run and its size is the whole story.
     if (MEMORY_SIZE < mem_nused + size)
-        error("Memory exhausted");
+        error("Memory exhausted: %u wanted, %u free",
+              (unsigned)size, (unsigned)(MEMORY_SIZE - mem_nused));
 
     Obj *obj = (Obj *)((char *)memory + mem_nused);
     mem_nused += size;
@@ -664,10 +744,15 @@ static void ms_mark_push(Obj *obj) {
     if (obj == NULL || !ms_in_heap(obj) || ms_marked(obj))
         return;
     ms_set_mark(obj);
-    if (mark_sp < MINILISP_GC_MARK_STACK)
+    if (mark_sp < MINILISP_GC_MARK_STACK) {
         mark_stack[mark_sp++] = obj;
-    else
+#if MINILISP_GC_STATS
+        if ((size_t)mark_sp > lisp_stats.mark_stack_peak)
+            lisp_stats.mark_stack_peak = (size_t)mark_sp;
+#endif
+    } else {
         mark_overflow = true;
+    }
 }
 
 // Marks everything the given object refers to.
@@ -715,6 +800,9 @@ static void ms_mark(void *root) {
         ms_clear_mark(obj);
         p += obj->size;
     }
+#if MINILISP_GC_STATS
+    lisp_stats.walked_bytes += heap_size;
+#endif
 
     mark_sp = 0;
     mark_overflow = false;
@@ -731,6 +819,10 @@ static void ms_mark(void *root) {
     // marked, so it can be read back as the queue that overflowed.
     while (mark_overflow) {
         mark_overflow = false;
+#if MINILISP_GC_STATS
+        lisp_stats.mark_rescues++;
+        lisp_stats.walked_bytes += heap_size;
+#endif
         for (uint8_t *p = heap; p < heap + heap_size; ) {
             Obj *obj = (Obj *)p;
             const size_t size = (size_t)obj->size;
@@ -805,6 +897,19 @@ static void ms_sweep(void) {
 
     free_list = head;
     mem_nused = live;
+
+#if MINILISP_GC_STATS
+    // Sweep is the one pass that has to touch dead data as well as live, which is the
+    // cost this strategy pays for not moving anything.
+    lisp_stats.walked_bytes += heap_size;
+    lisp_stats.free_blocks = 0;
+    lisp_stats.free_largest = 0;
+    for (const Obj *b = free_list; b != NULL; b = ms_next_free(b)) {
+        lisp_stats.free_blocks++;
+        if ((size_t)b->size > lisp_stats.free_largest)
+            lisp_stats.free_largest = (size_t)b->size;
+    }
+#endif
 }
 
 void gc(void *root) {
@@ -814,9 +919,19 @@ void gc(void *root) {
 #if MINILISP_GC_DEBUG
     const size_t before = mem_nused;
 #endif
+#if MINILISP_GC_STATS
+    const uint64_t stats_started = stats_now();
+#endif
 
     ms_mark(root);
     ms_sweep();
+
+#if MINILISP_GC_STATS
+    lisp_stats.collections++;
+    // What survived is what marking had to reach and sweep had to keep.
+    lisp_stats.traced_bytes += mem_nused;
+    stats_add_gc_time(stats_started);
+#endif
 
 #if MINILISP_GC_DEBUG
     if (debug_gc)
@@ -854,6 +969,7 @@ static bool gc_heap_create(void) {
         heap_size = 0;
         return false;
     }
+    STATS_SYSTEM_ADD(heap_size);
 
     // The whole heap begins as a single free block.
     Obj *block = (Obj *)heap;
@@ -868,6 +984,8 @@ static bool gc_heap_create(void) {
 }
 
 static void gc_heap_destroy(void) {
+    if (heap != NULL)
+        STATS_SYSTEM_SUB(heap_size);
     free(heap);
     heap = NULL;
     heap_size = 0;
@@ -936,23 +1054,22 @@ static Obj *gc_alloc_raw(void *root, size_t size) {
         obj = ms_take(size);
     }
     if (obj == NULL) {
-#if MINILISP_GC_DEBUG
-        // Two very different situations end here and the message alone cannot tell them
-        // apart: a heap that is genuinely full, and one with plenty of free bytes but no
-        // single run of them long enough. Sizing a device heap needs to know which, so
-        // say so where saying so is free.
-        size_t total = 0, blocks = 0, largest = 0;
+        // Two very different situations end here, and a bare "Memory exhausted" cannot
+        // tell them apart: a heap that is genuinely full, and one with plenty of free
+        // bytes that are broken into pieces too small to use. Whoever has to size a
+        // device heap needs to know which, and only the collector is in a position to
+        // say, so the numbers go in the message. The walk costs nothing that matters:
+        // it happens once, on the way to raising.
+        size_t total = 0, largest = 0;
         for (const Obj *b = free_list; b != NULL; b = ms_next_free(b)) {
             total += (size_t)b->size;
-            blocks++;
             if ((size_t)b->size > largest)
                 largest = (size_t)b->size;
         }
-        printf_to_handler(NULL, 0, 0,
-                          "GC: %zu bytes wanted; heap %zu, live %zu, free %zu in %zu blocks, largest %zu.\n",
-                          size, heap_size, mem_nused, total, blocks, largest);
-#endif
-        error("Memory exhausted");
+        // total close to size means full; total far above it with a small largest means
+        // fragmented.
+        error("Memory exhausted: %u wanted, %u free, largest block %u",
+              (unsigned)size, (unsigned)total, (unsigned)largest);
     }
 
     return obj;
