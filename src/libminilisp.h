@@ -346,6 +346,19 @@ bool safe_eval(void *root, Obj **env, Obj **expr);
 
 void lisp_set_cycle_yield(yield_def yield);
 
+// Installs the handlers that receive output, log lines and errors.
+//
+// Two things are required of a handler, because the text it is given lives in a buffer
+// the interpreter reuses rather than in one allocated per call:
+//
+//   - Consume the text before returning. Copy it; do not keep the pointer.
+//   - Do not evaluate Lisp from inside a handler, directly or indirectly. An error
+//     handler in particular runs part-way through raising, with the interpreter's state
+//     half unwound.
+//
+// Both are easy to meet -- copy the bytes, and queue anything else for later rather than
+// doing it inline -- but neither is checked, and breaking either corrupts the message
+// rather than failing loudly.
 void lisp_set_printers(print_def out, print_def log, print_def err);
 
 size_t lisp_mem_used(void);
