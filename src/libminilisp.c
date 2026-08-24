@@ -577,7 +577,7 @@ static Obj *gc_alloc_raw(void *root, size_t size) {
 
     Obj *obj = (Obj *)((char *)memory + mem_nused);
     mem_nused += size;
-    obj->size = (int)size;
+    obj->size = (uint16_t)size;
     return obj;
 }
 
@@ -630,10 +630,12 @@ static void gc_verify(void *root) {
         if (obj->type >= TTRUE)
             gc_verify_fail("GC verify: statically allocated type %d found in the heap at offset %u",
                            obj->type, (unsigned)offset);
-        if (obj->size <= 0 || (size_t)obj->size < offsetof(Obj, value))
-            gc_verify_fail("GC verify: implausible size %d at offset %u", obj->size, (unsigned)offset);
+        if ((size_t)obj->size < offsetof(Obj, value))
+            gc_verify_fail("GC verify: implausible size %u at offset %u",
+                           (unsigned)obj->size, (unsigned)offset);
         if ((size_t)obj->size % sizeof(void *) != 0)
-            gc_verify_fail("GC verify: misaligned size %d at offset %u", obj->size, (unsigned)offset);
+            gc_verify_fail("GC verify: misaligned size %u at offset %u",
+                           (unsigned)obj->size, (unsigned)offset);
         if (p + obj->size > end)
             gc_verify_fail("GC verify: the object at offset %u runs past the end of the heap",
                            (unsigned)offset);
@@ -862,7 +864,7 @@ static void ms_release(uint8_t *start, size_t size, Obj **head, Obj **tail) {
 #endif
     block->type = TFREE;
     block->constant = false;
-    block->size = (int)size;
+    block->size = (uint16_t)size;
     ms_set_next_free(block, NULL);
 
     if (*tail == NULL)
@@ -970,8 +972,10 @@ static bool gc_heap_create(void) {
 #endif
 
     heap_size = MEMORY_SIZE & ~(sizeof(void *) - 1);
-    // The block size is held in an int, and one block has to be able to span the heap.
-    if (heap_size < MS_MIN_BLOCK || heap_size > (size_t)INT_MAX)
+    // One free block has to be able to span the whole heap, so the heap cannot be longer
+    // than the size field can count. lisp_create() refuses such a request before getting
+    // here; this is the backstop for anyone setting MEMORY_SIZE directly.
+    if (heap_size < MS_MIN_BLOCK || heap_size > LISP_MAX_HEAP)
         return false;
 
     heap = (uint8_t *)malloc(heap_size);
@@ -985,7 +989,7 @@ static bool gc_heap_create(void) {
     Obj *block = (Obj *)heap;
     block->type = TFREE;
     block->constant = false;
-    block->size = (int)heap_size;
+    block->size = (uint16_t)heap_size;
     ms_set_next_free(block, NULL);
 
     free_list = block;
@@ -1027,10 +1031,10 @@ static Obj *ms_take(size_t size) {
             Obj *remainder = (Obj *)((uint8_t *)block + size);
             remainder->type = TFREE;
             remainder->constant = false;
-            remainder->size = (int)rest;
+            remainder->size = (uint16_t)rest;
             ms_set_next_free(remainder, next);
             next = remainder;
-            block->size = (int)size;
+            block->size = (uint16_t)size;
         }
 
         if (prev == NULL)
@@ -1135,10 +1139,12 @@ static void gc_verify(void *root) {
         // Marks belong to a collection in progress and nothing else.
         if (ms_marked(obj))
             gc_verify_fail("GC verify: mark left set at offset %u", (unsigned)offset);
-        if (obj->size <= 0 || (size_t)obj->size < MS_MIN_BLOCK)
-            gc_verify_fail("GC verify: implausible size %d at offset %u", obj->size, (unsigned)offset);
+        if ((size_t)obj->size < MS_MIN_BLOCK)
+            gc_verify_fail("GC verify: implausible size %u at offset %u",
+                           (unsigned)obj->size, (unsigned)offset);
         if ((size_t)obj->size % sizeof(void *) != 0)
-            gc_verify_fail("GC verify: misaligned size %d at offset %u", obj->size, (unsigned)offset);
+            gc_verify_fail("GC verify: misaligned size %u at offset %u",
+                           (unsigned)obj->size, (unsigned)offset);
         if (p + obj->size > end)
             gc_verify_fail("GC verify: the block at offset %u runs past the end of the heap",
                            (unsigned)offset);
@@ -2199,6 +2205,11 @@ void lisp_create(size_t size, int max_eval_depth)
 {
     if (!s_heap_created)
     {
+        // Refused rather than clamped: a caller that asks for more than can be addressed
+        // has misjudged something, and quietly giving it less would hide that. The heap
+        // is not created and lisp_is_created() stays false.
+        if (size > LISP_MAX_HEAP)
+            return;
         MEMORY_SIZE = size;
         s_max_eval_depth = max_eval_depth;
         eval_depth = 0;

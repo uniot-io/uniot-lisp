@@ -80,7 +80,6 @@ extern "C" {
 
 #include <assert.h>
 #include <ctype.h>
-#include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -119,6 +118,23 @@ enum
     TFREE,
 };
 
+// Pins the value union to exactly the alignment a pointer needs: no less, so nothing is
+// under-aligned, and no more, so the two tag bytes ahead of it are not padded out.
+//
+// Insurance rather than a fix for anything currently wrong. Xtensa rounds an aggregate's
+// alignment up to its size when that size is a power of two, so a union of two pointers
+// lands on eight and pushes the union to offset eight, undoing the narrow size field. The
+// union below is twelve bytes and escapes that, but it would not take much of a change to
+// walk into it, and the assertion after the struct is what would catch it.
+#if defined(__GNUC__) || defined(__clang__)
+#define LISP_HAVE_ALIGN_ATTRIBUTE 1
+#define LISP_ALIGN_AS_POINTER __attribute__((aligned(__alignof__(void *))))
+#else
+// Without it every object is four bytes larger on a 32-bit target. That costs heap, not
+// correctness.
+#define LISP_ALIGN_AS_POINTER
+#endif
+
 // Typedef for the primitive function
 struct Obj;
 typedef struct Obj *Primitive(void *root, struct Obj **env, struct Obj **args);
@@ -135,7 +151,13 @@ typedef struct Obj
 
     // The total size of the object, including "type" field, this field, the contents, and the
     // padding at the end of the object.
-    int size;
+    //
+    // Sixteen bits rather than a full int, which is what makes the header four bytes on a
+    // 32-bit target instead of eight: an int here would sit on a four-byte boundary and
+    // leave two bytes of padding behind the two tag bytes. That is four bytes saved on
+    // every object, and the objects are small -- an integer is eight bytes with this
+    // field and twelve without. The ceiling it imposes is LISP_MAX_HEAP.
+    uint16_t size;
 
     // Object values.
     union {
@@ -167,8 +189,17 @@ typedef struct Obj
         };
         // Forwarding pointer
         void *moved;
-    };
+    } LISP_ALIGN_AS_POINTER;
 } Obj;
+
+// The narrow size field only pays off if the union starts immediately after it, giving a
+// four byte header on a 32-bit target instead of eight. That is worth a third of the size
+// of a small object, so a change that silently gave it back should stop the build rather
+// than quietly shrink the usable heap.
+#if defined(LISP_HAVE_ALIGN_ATTRIBUTE)
+typedef char lisp_assert_header_is_packed[
+    (sizeof(void *) != 4 || offsetof(Obj, value) == 4) ? 1 : -1];
+#endif
 
 typedef void (*yield_def)();
 typedef void (*print_def)(const char *msg, int size);
@@ -303,6 +334,12 @@ extern int eval_depth_max;
 #ifndef MINILISP_GC_MARK_STACK
 #define MINILISP_GC_MARK_STACK 128
 #endif
+
+// The largest heap that can be asked for. Every block records its own length in the
+// sixteen-bit `size` field above, and under mark-sweep a run of free memory is one block
+// that can span the whole heap, so the heap cannot be longer than that field can count.
+// lisp_create() refuses a larger request and lisp_is_created() stays false.
+#define LISP_MAX_HEAP 65535
 
 // The size of the heap in byte
 extern size_t MEMORY_SIZE;
