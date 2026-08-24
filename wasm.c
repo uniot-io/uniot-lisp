@@ -124,7 +124,7 @@ void print_err(const char *msg, int size)
 
 void print_out(const char *msg, int size)
 {
-    char escaped_msg[SYMBOL_MAX_LEN * 2];
+    char escaped_msg[LISP_PRINT_MAX_LEN * 2];
     int escaped_size = escape_json_string(msg, escaped_msg, sizeof(escaped_msg));
     if (escaped_size < 0) {
         print_err("Failed to escape JSON string in print_out", 0);
@@ -140,8 +140,8 @@ void print_out(const char *msg, int size)
 // param msg must be null-terminated
 void print_state(const char *msg, const char *result)
 {
-    char escaped_msg[SYMBOL_MAX_LEN * 2];
-    char escaped_result[SYMBOL_MAX_LEN * 2];
+    char escaped_msg[LISP_PRINT_MAX_LEN * 2];
+    char escaped_result[LISP_PRINT_MAX_LEN * 2];
     int escaped_size_msg = escape_json_string(msg, escaped_msg, sizeof(escaped_msg));
     int escaped_size_result = escape_json_string(result, escaped_result, sizeof(escaped_result));
 
@@ -150,7 +150,7 @@ void print_state(const char *msg, const char *result)
         return;
     }
 
-    char buf[SYMBOL_MAX_LEN * 2];
+    char buf[LISP_PRINT_MAX_LEN * 4 + 64];
     int size = snprintf(buf, sizeof(buf), json_mask_state, escaped_msg, escaped_result);
     if (size < 0 || size >= sizeof(buf)) {
         print_err("Buffer overflow in print_state", 0);
@@ -169,8 +169,8 @@ const char* js_handle_state(const char *msg) {
 
 void js_handle_state_task(int times, int ms, int pass)
 {
-    char buf[SYMBOL_MAX_LEN];
-    sprintf(buf, "task %d %d %d", times, ms, pass);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "task %d %d %d", times, ms, pass);
     js_handle_state(buf);
 }
 
@@ -234,7 +234,7 @@ static struct Obj *prim_tojs(void *root, struct Obj **env, struct Obj **list)
 {
     Obj *args = eval_list(root, env, list);
 
-    char buf[SYMBOL_MAX_LEN];
+    char buf[LISP_PRINT_MAX_LEN];
     int size = print_to_buf(buf, sizeof(buf), 0, args);
     if (size > 0)
         buf[size - 1] = 0; // do not display ")"

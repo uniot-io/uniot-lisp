@@ -81,8 +81,8 @@ static int buffer_ungetc(int c)
 // This assumes a print handler does not itself evaluate Lisp, and that it consumes what
 // it is given before returning rather than keeping the pointer. Both already hold: the
 // handlers copy the text out and none of them re-enter the interpreter.
-static char s_value_buf[SYMBOL_MAX_LEN];
-static char s_message_buf[SYMBOL_MAX_LEN];
+static char s_value_buf[LISP_PRINT_MAX_LEN];
+static char s_message_buf[LISP_MESSAGE_MAX_LEN];
 
 // Hands an already formatted string to a handler. The obvious spelling of this,
 // printf_to_handler(NULL, 0, 0, "%s", buf), copies the string through a second buffer for

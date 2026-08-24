@@ -94,10 +94,13 @@ Module.onRuntimeInitialized = async () => {
 
   // A result longer than SYMBOL_MAX_LEN used to overflow a fixed stack buffer.
   // It must now come back truncated and marked, with the module still usable.
+  // Comfortably past LISP_PRINT_MAX_LEN rather than just over it, so that the check is
+  // about the truncation working at all and not about where the limit happens to sit.
   r = await evaluate(
     '(define l (list 1 2 3 4 5 6 7 8 9 10))' +
     '(define m (list l l l l l l l l l l))' +
-    '(print m)')
+    '(define n (list m m m m m m m m m m))' +
+    '(print n)')
   check('long output is truncated, not overflowed',
     r.json && r.json.out.some(o => o.endsWith('...')),
     `expected a truncated entry ending in "...", got ${r.raw}`)

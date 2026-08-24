@@ -27,7 +27,22 @@ extern "C" {
 
 #define LISP_VERSION SEMVER_TO_INT(0, 2, 5)
 
-#define SYMBOL_MAX_LEN 200
+// The three limits below used to be one constant, which meant a symbol name, an error
+// message and a printed value were all bounded by whatever suited the largest of them.
+// They are unrelated, and sizing them apart costs less RAM while giving the one a user
+// actually sees more room.
+
+// Longest symbol name that can be read. The longest in use anywhere is thirteen
+// characters, so this is five times what is needed; a longer name raises.
+#define SYMBOL_MAX_LEN 64
+
+// Longest error or log message: the longest format string in the library plus a symbol
+// name substituted into it, with room to spare.
+#define LISP_MESSAGE_MAX_LEN 128
+
+// Longest printed value. This is what a script's output is truncated to, so of the three
+// it is the one a user notices.
+#define LISP_PRINT_MAX_LEN 256
 
 #define MAX_LOOP_ITERATIONS 9999
 
