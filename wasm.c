@@ -26,7 +26,7 @@
 #define BUF_LIB_SIZE    2048
 #define MAX_TASK_ITER   9999
 
-const char json_mask_result[] = "{ \"out\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total_used\": %lu, \"total_available\": %lu }, \"eval\": { \"depth_max\": %d, \"depth_limit\": %d }, \"library\": \"%s\", \"task_limit\": %d, \"time\": %.2g } }";
+const char json_mask_result[] = "{ \"out\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total_used\": %lu, \"total_available\": %lu }, \"eval\": { \"depth_max\": %d, \"stack_used\": %lu, \"stack_limit\": %lu }, \"library\": \"%s\", \"task_limit\": %d, \"time\": %.2g } }";
 const char json_mask_err[] = "{ \"msg\": \"%s\", \"idx\": %d }";
 const char json_mask_state[] = "{ \"ask\": \"%s\", \"answer\": \"%s\" }";
 
@@ -271,12 +271,12 @@ static void define_custom_items(void *root, struct Obj **env)
     add_constant_int(root, env, "#t_pass", 0);
 }
 
-static bool lisp_shoot_once(size_t max_heap, int max_eval_depth, const char *library, const char *input)
+static bool lisp_shoot_once(size_t max_heap, size_t max_eval_stack, const char *library, const char *input)
 {
     void *root = NULL;
     DEFINE1(env);
 
-    lisp_create(max_heap, max_eval_depth);
+    lisp_create(max_heap, max_eval_stack);
 
     *env = make_env(root, &Nil, &Nil);
     define_constants(root, env);
@@ -311,7 +311,7 @@ void terminate()
 }
 
 EMSCRIPTEN_KEEPALIVE
-int lisp_evaluate(size_t max_heap, int max_eval_depth, const char *library, const char *input, char *output, int task_limiter)
+int lisp_evaluate(size_t max_heap, size_t max_eval_stack, const char *library, const char *input, char *output, int task_limiter)
 {
     if (task_limiter > MAX_TASK_ITER) {
         task_limiter = MAX_TASK_ITER;
@@ -353,7 +353,7 @@ int lisp_evaluate(size_t max_heap, int max_eval_depth, const char *library, cons
             }
 
             double time_started = emscripten_get_now();
-            success = lisp_shoot_once(max_heap, max_eval_depth, library, input);
+            success = lisp_shoot_once(max_heap, max_eval_stack, library, input);
             time_taken = emscripten_get_now() - time_started;
 
             // Remove trailing commas
@@ -383,7 +383,8 @@ int lisp_evaluate(size_t max_heap, int max_eval_depth, const char *library, cons
     }
 
     // Safely format the final JSON output
-    int output_size = snprintf(output, BUF_OUT_SIZE, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, max_heap, eval_depth_max, max_eval_depth, json_buf_lib, global_task_limiter, time_taken);
+    int output_size = snprintf(output, BUF_OUT_SIZE, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, max_heap, eval_depth_max, (unsigned long)eval_stack_max,
+                              (unsigned long)max_eval_stack, json_buf_lib, global_task_limiter, time_taken);
     if (output_size < 0 || output_size >= BUF_OUT_SIZE) {
         // Handle output buffer overflow
         return -1;

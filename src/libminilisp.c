@@ -1598,22 +1598,59 @@ static inline bool is_valid_ptr(const void *p) {
 static Obj *eval_inner(void *root, Obj **env, Obj **obj);
 
 // Current eval nesting, and the deepest nesting reached since eval_depth_max was
-// last cleared. Exposed so a recursion limit can be sized from measurements on the
-// target rather than guessed. eval_depth is reset by error(), because a longjmp out
-// of a nested eval skips the decrements below.
+// last cleared. Kept as statistics; the guard below measures stack, not nesting.
+// eval_depth is reset by error(), because a longjmp out of a nested eval skips the
+// decrements below.
 int eval_depth = 0;
 int eval_depth_max = 0;
 
-// Nesting cap, taken from lisp_create(). Zero means no limit.
-static int s_max_eval_depth = 0;
+// The most stack one evaluation has consumed, in bytes.
+size_t eval_stack_max = 0;
+
+// Stack budget for one evaluation, taken from lisp_create(). Zero means no limit.
+static size_t s_max_eval_stack = 0;
+
+// Where the stack stood when the current evaluation began, set by lisp_eval() and
+// safe_eval(). NULL when no evaluation is in progress, in which case nothing is
+// measured and nothing is enforced.
+static const char *s_stack_base = NULL;
+
+// Stack consumed since the evaluation began. Which way the stack grows is not fixed by
+// the C standard, so the distance is taken whichever way round it lies.
+static inline size_t eval_stack_used(const char *here) {
+    if (s_stack_base == NULL)
+        return 0;
+    return (s_stack_base > here) ? (size_t)(s_stack_base - here)
+                                 : (size_t)(here - s_stack_base);
+}
+
+// Marks the start of an evaluation. Returns the previous base so a caller that finds
+// itself nested inside another evaluation can put it back, rather than leaving the
+// outer one measuring from a frame that has since returned.
+static const char *eval_stack_begin(const char *here) {
+    const char *previous = s_stack_base;
+    s_stack_base = here;
+    return previous;
+}
 
 // Evaluates the S expression.
 Obj *eval(void *root, Obj **env, Obj **obj) {
+    // Taking the address of a local is the cheapest way to read the stack pointer, and
+    // it costs one comparison per eval. Measuring here rather than counting levels means
+    // an expensive level -- one that prints, say -- is charged what it actually costs.
+    char stack_marker;
+    const size_t used = eval_stack_used(&stack_marker);
+    if (used > eval_stack_max)
+        eval_stack_max = used;
+
     if (++eval_depth > eval_depth_max)
         eval_depth_max = eval_depth;
-    if (s_max_eval_depth > 0 && eval_depth > s_max_eval_depth) {
+
+    if (s_max_eval_stack > 0 && used > s_max_eval_stack) {
         // error() clears eval_depth before unwinding, so no decrement is owed here.
-        error("Recursion too deep: eval nesting exceeded %d", s_max_eval_depth);
+        // Raising needs stack of its own, which is why the budget must leave room for it.
+        error("Recursion too deep: evaluation used %u bytes of stack, limit is %u",
+              (unsigned)used, (unsigned)s_max_eval_stack);
     }
     Obj *result = eval_inner(root, env, obj);
     --eval_depth;
@@ -2201,7 +2238,7 @@ void define_primitives(void *root, Obj **env) {
 // Entry point
 //======================================================================
 
-void lisp_create(size_t size, int max_eval_depth)
+void lisp_create(size_t size, size_t max_eval_stack)
 {
     if (!s_heap_created)
     {
@@ -2211,9 +2248,11 @@ void lisp_create(size_t size, int max_eval_depth)
         if (size > LISP_MAX_HEAP)
             return;
         MEMORY_SIZE = size;
-        s_max_eval_depth = max_eval_depth;
+        s_max_eval_stack = max_eval_stack;
         eval_depth = 0;
         eval_depth_max = 0;
+        eval_stack_max = 0;
+        s_stack_base = NULL;
         if (gc_heap_create())
         {
             s_heap_created = true;
@@ -2242,6 +2281,10 @@ bool lisp_eval(void *root, Obj **env, const char *code)
 {
     current_buffer = code;
     current_index = 0;
+
+    // This frame is what the recursion guard measures against.
+    char stack_marker;
+    const char *outer_base = eval_stack_begin(&stack_marker);
 
     // Preserve any handler a caller already installed, so a nested evaluation does not
     // leave the outer one pointing at a frame that has returned.
@@ -2280,11 +2323,15 @@ bool lisp_eval(void *root, Obj **env, const char *code)
     error_jumper_valid = outer_valid;
     if (outer_valid)
         memcpy(error_jumper, outer_jumper, sizeof(jmp_buf));
+    s_stack_base = outer_base;
     return result;
 }
 
 bool safe_eval(void *root, Obj **env, Obj **expr)
 {
+    char stack_marker;
+    const char *outer_base = eval_stack_begin(&stack_marker);
+
     jmp_buf outer_jumper;
     const bool outer_valid = error_jumper_valid;
     if (outer_valid)
@@ -2305,6 +2352,7 @@ bool safe_eval(void *root, Obj **env, Obj **expr)
     error_jumper_valid = outer_valid;
     if (outer_valid)
         memcpy(error_jumper, outer_jumper, sizeof(jmp_buf));
+    s_stack_base = outer_base;
     return result;
 }
 

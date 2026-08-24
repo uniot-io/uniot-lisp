@@ -153,7 +153,7 @@ static uint64_t run_once(const Workload *w, bool *ok)
 
   error_text[0] = '\0';
 
-  lisp_create(w->heap, 512);
+  lisp_create(w->heap, 256 * 1024);
   if (!lisp_is_created())
   {
     snprintf(error_text, sizeof(error_text), "could not allocate a %u byte heap",
@@ -192,7 +192,7 @@ static size_t measure_setup_cost(void)
   void *root = env_constructor;
   Obj **genv = (Obj **)(env_constructor + 1);
 
-  lisp_create(512 * 1024, 512);
+  lisp_create(512 * 1024, 256 * 1024);
   if (!lisp_is_created())
     return (size_t)-1;
 

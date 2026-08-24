@@ -38,12 +38,12 @@ function run() {
 }
 
 # Runs code that is expected to raise, and checks the message.
-#   $1 name, $2 expected substring, $3 code, $4 optional eval depth limit
+#   $1 name, $2 expected substring, $3 code, $4 optional eval stack budget in bytes
 function run_error() {
   echo -n "Testing $1 ... "
   local before=$FAILURES
   local out
-  out=$(echo "$3" | MINILISP_MAX_EVAL_DEPTH="${4:-}" "$REPL" 2>&1 >/dev/null | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
+  out=$(echo "$3" | MINILISP_MAX_EVAL_STACK="${4:-}" "$REPL" 2>&1 >/dev/null | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
   if [[ "$out" != *"$2"* ]]; then
     echo FAILED
     fail "expected an error containing \"$2\", got \"$out\""
@@ -263,7 +263,10 @@ run gc-churn 55 "
   (f 10)"
 
 # Recursion guard: deep recursion must raise rather than overrun the C stack.
-run_error "eval depth guard" "Recursion too deep" '(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 50)' 8
+# A budget far below what fifty nested calls need, so the guard raises rather than the
+# stack running out. The figure is in bytes and is deliberately tiny: what matters is
+# that the limit is enforced, not where it sits.
+run_error "eval stack guard" "Recursion too deep" '(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 50)' 512
 
 if [ "$FAILURES" -ne 0 ]; then
   echo -e "\n$FAILURES check(s) failed"

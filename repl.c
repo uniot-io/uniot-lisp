@@ -75,11 +75,12 @@ int main()
   const char *heap_env = getenv("MINILISP_HEAP_SIZE");
   size_t heap_size = (heap_env != NULL && heap_env[0] != '\0') ? (size_t)atoi(heap_env) : 40000;
   // Generous by default: a workstation stack is large, and the limit exists to catch
-  // runaway recursion rather than to emulate a device.
-  const char *depth_env = getenv("MINILISP_MAX_EVAL_DEPTH");
-  int eval_depth_limit = (depth_env != NULL && depth_env[0] != '\0') ? atoi(depth_env) : 256;
+  // runaway recursion rather than to emulate a device. In bytes of C stack.
+  const char *stack_env = getenv("MINILISP_MAX_EVAL_STACK");
+  size_t eval_stack_limit =
+      (stack_env != NULL && stack_env[0] != '\0') ? (size_t)atol(stack_env) : 256 * 1024;
 
-  lisp_create(heap_size, eval_depth_limit);
+  lisp_create(heap_size, eval_stack_limit);
   if (!lisp_is_created())
   {
     fprintf(stderr, "failed to allocate a %u byte heap\n", (unsigned)heap_size);

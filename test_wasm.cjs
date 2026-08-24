@@ -23,8 +23,12 @@ const RED = '\x1b[1;31m'
 const RESET = '\x1b[0m'
 const HEAP = 8000
 const TASK_LIMIT = 200
-// Matches an ESP8266, the tightest real target.
-const EVAL_DEPTH = 16
+// The recursion guard is a stack budget in bytes, not a nesting count. Note that a WASM
+// build's frames are not an ESP8266's, so `stack_used` here does not predict what a
+// script will spend on a device; `depth_max` is reported alongside it because nesting at
+// least does not change with the architecture, which makes it the better of two
+// imperfect handles for estimating.
+const EVAL_STACK = 8 * 1024
 
 let failures = 0
 
@@ -66,7 +70,7 @@ Module.onRuntimeInitialized = async () => {
   async function evaluate(script, library = '(defjs led (i s))') {
     Module.writeAsciiToMemory(script, input_ptr, false)
     Module.writeAsciiToMemory(library, library_ptr, false)
-    const size = await api.lisp_evaluate(HEAP, EVAL_DEPTH, library_ptr, input_ptr, output_ptr, TASK_LIMIT)
+    const size = await api.lisp_evaluate(HEAP, EVAL_STACK, library_ptr, input_ptr, output_ptr, TASK_LIMIT)
     const raw = Module.AsciiToString(output_ptr)
     let json = null
     try {
@@ -122,22 +126,31 @@ Module.onRuntimeInitialized = async () => {
     `expected an error naming the symbol and a negative size, got size=${r.size} ${r.raw}`)
 
   // The emulator reports what a script actually cost, so the editor can warn before a
-  // script is pushed to hardware.
+  // script is pushed to hardware. Both figures are carried: the stack the guard acts on,
+  // and the nesting a caller can compare against a board's own measured limit.
   r = await evaluate('(+ 1 2)')
-  check('meta reports eval depth',
+  check('meta reports eval cost',
     r.json && r.json.meta && r.json.meta.eval &&
     typeof r.json.meta.eval.depth_max === 'number' &&
     r.json.meta.eval.depth_max > 0 &&
-    r.json.meta.eval.depth_limit === EVAL_DEPTH,
-    `expected meta.eval with a positive depth_max and depth_limit ${EVAL_DEPTH}, got ${r.raw}`)
+    typeof r.json.meta.eval.stack_used === 'number' &&
+    r.json.meta.eval.stack_used > 0 &&
+    r.json.meta.eval.stack_limit === EVAL_STACK,
+    `expected meta.eval with positive depth_max and stack_used, and stack_limit ${EVAL_STACK}, got ${r.raw}`)
 
-  // The caller asks for an ESP8266-sized limit, so recursion that would overrun that
-  // device is refused here too rather than appearing to work in the browser.
-  r = await evaluate('(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 30)')
-  check('emulated ESP8266 recursion limit',
+  // Recursion past the budget is refused rather than allowed to run the stack out.
+  r = await evaluate('(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 200)')
+  check('recursion guard',
     r.json && r.json.err && typeof r.json.err.msg === 'string' &&
     r.json.err.msg.includes('Recursion too deep'),
     `expected a recursion error, got ${r.raw}`)
+
+  // And the guard is a budget, not a fixed depth: a shallower run of the same shape
+  // stays inside it.
+  r = await evaluate('(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 3)')
+  check('recursion within budget',
+    r.json && !r.json.err && r.json.out[r.json.out.length - 1] === '0',
+    `expected (f 3) to succeed, got ${r.raw}`)
 
   // The module must still evaluate after the failures above.
   r = await evaluate('(+ 20 22)')

@@ -299,9 +299,15 @@ void lisp_stats_reset(void);
 #endif
 
 // Current eval nesting, and the deepest nesting reached since eval_depth_max was last
-// cleared. Clear eval_depth_max yourself before a measurement and read it afterwards.
+// cleared. Statistics only -- nesting is not what the recursion guard measures. Clear
+// eval_depth_max yourself before a measurement and read it afterwards.
 extern int eval_depth;
 extern int eval_depth_max;
+
+// The most C stack a single evaluation has consumed since this was last cleared, in
+// bytes. This is the quantity the recursion guard is measured against, so it is the one
+// to read when choosing a limit for a target. Cleared by lisp_create().
+extern size_t eval_stack_max;
 
 // Garbage collection strategy. Override it with a build flag.
 //
@@ -380,13 +386,20 @@ Obj *get_variable(void *root, Obj **env, const char *name);
 
 // Creates the interpreter.
 //
-// `size` is the heap in bytes. `max_eval_depth` caps the nesting of eval(): recursion
-// runs on the C stack, and overrunning it crashes the host instead of raising an error,
-// so the depth is checked rather than discovered. Pass 0 for no limit.
+// `size` is the heap in bytes. `max_eval_stack` caps how much C stack a single
+// evaluation may consume, also in bytes; zero lifts the cap. Recursion in a script runs
+// on the C stack, and overrunning it crashes the host rather than raising, so the cost
+// is measured as it is incurred instead of being inferred.
 //
-// One level costs 168 bytes on an ESP8266 and 184 on an ESP32-C3, measured on target.
-// A host with a large stack can pass a generous value; an embedded host should measure.
-void lisp_create(size_t size, int max_eval_depth);
+// Bytes rather than a count of nesting levels, because levels are not what runs out.
+// Nesting is only a proxy for stack, and a poor one: a level that prints costs several
+// times what a bare call costs, so a nesting limit is either too tight for simple
+// scripts or too loose for the ones that do something. It also has to be retuned for
+// every chip, and cannot see the stack the host's own error handler will need on top.
+//
+// Pick it as: stack available where lisp_eval() is called, less what raising an error
+// costs on this host, less a margin. tools/LispEvalDepth measures all three on target.
+void lisp_create(size_t size, size_t max_eval_stack);
 
 void lisp_destroy(void);
 
