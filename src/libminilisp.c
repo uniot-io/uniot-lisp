@@ -1020,6 +1020,9 @@ static Obj *ms_take(size_t size) {
     Obj *prev = NULL;
     for (Obj *block = free_list; block != NULL; block = ms_next_free(block)) {
         const size_t avail = (size_t)block->size;
+#if MINILISP_GC_STATS
+        lisp_stats.alloc_hops++;
+#endif
         if (avail < size) {
             prev = block;
             continue;

@@ -286,6 +286,11 @@ typedef struct {
     size_t free_blocks;
     size_t free_largest;
 
+    // Free-list nodes stepped over across all allocations. Divided by `allocations`
+    // this is how far the average request has to look for a block that fits, which is
+    // the figure that decides whether the search strategy is worth changing.
+    size_t alloc_hops;
+
     // Mark-sweep bookkeeping
     size_t mark_stack_peak;
     size_t mark_rescues;     // passes over the heap made because the work stack filled
