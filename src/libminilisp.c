@@ -161,19 +161,6 @@ static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 }
 // TODO: --------------------------------------------------------------------
 
-// A tail expression handed back to eval() by a primitive that ends in one, so that eval
-// can loop instead of recursing. `prim_if` is the reason this exists: the recursive call
-// in (defun f (n) (if (= n 0) 0 (f (+ n -1)))) sits in the tail of an `if`, which sits in
-// the tail of the body, and unless both are tail positions the idiom gains nothing.
-//
-// These are collector roots. Nothing allocates between a primitive setting them and eval
-// consuming them, so today they could be left out of the root set -- but that is a
-// property of code elsewhere, and a later primitive that allocates on the way out would
-// break it silently under a moving collector. Rooting them costs two pointers.
-static Obj *tail_obj = NULL;
-static Obj *tail_env = NULL;
-static bool tail_pending = false;
-
 void __attribute((noreturn)) error(const char *fmt, ...) {
     cycle_in_progress = false;
 
@@ -181,14 +168,6 @@ void __attribute((noreturn)) error(const char *fmt, ...) {
     // collection would trip assert(!gc_running), or, in a build with NDEBUG, would
     // silently re-enter a half-finished collection.
     gc_running = false;
-
-    // Nothing can raise between a primitive setting a tail expression and eval() taking
-    // it, so these are already clear by the time anything unwinds. Cleared anyway, so
-    // that the invariant holds locally rather than depending on that being true of every
-    // primitive written from now on -- and so a dead object is not held by a root.
-    tail_pending = false;
-    tail_obj = NULL;
-    tail_env = NULL;
 
     va_list ap;
     va_start(ap, fmt);
@@ -454,10 +433,6 @@ static void *alloc_semispace() {
 // Copies the root objects.
 static void forward_root_objects(void *root) {
     Symbols = forward(Symbols);
-    if (tail_obj)
-        tail_obj = forward(tail_obj);
-    if (tail_env)
-        tail_env = forward(tail_env);
     for (void **frame = (void **)root; frame; frame = *(void ***)frame)
         for (int i = 1; frame[i] != ROOT_END; i++)
             if (frame[i])
@@ -695,8 +670,6 @@ static void gc_verify(void *root) {
             gc_verify_ref((const Obj *)frame[i], "root slot", 0);
 
     gc_verify_ref(Symbols, "the symbol table", 0);
-    gc_verify_ref(tail_obj, "the pending tail expression", 0);
-    gc_verify_ref(tail_env, "the pending tail environment", 0);
 }
 #endif  // MINILISP_GC_DEBUG
 
@@ -843,8 +816,6 @@ static void ms_mark(void *root) {
     mark_overflow = false;
 
     ms_mark_push(Symbols);
-    ms_mark_push(tail_obj);
-    ms_mark_push(tail_env);
     for (void **frame = (void **)root; frame; frame = *(void ***)frame)
         for (int i = 1; frame[i] != ROOT_END; i++)
             if (frame[i])
@@ -1257,8 +1228,6 @@ static void gc_verify(void *root) {
             gc_verify_ref((const Obj *)frame[i], "root slot", 0);
 
     gc_verify_ref(Symbols, "the symbol table", 0);
-    gc_verify_ref(tail_obj, "the pending tail expression", 0);
-    gc_verify_ref(tail_env, "the pending tail environment", 0);
 }
 #endif  // MINILISP_GC_DEBUG
 
@@ -1666,6 +1635,42 @@ static inline bool is_valid_ptr(const void *p) {
     return gc_owns(p);
 }
 
+// Evaluates every form of a body except the last, and returns the last one unevaluated,
+// so that the caller can put it in tail position rather than evaluating it in a frame of
+// its own. `list` must not be empty, and is advanced to its last cell.
+//
+// This is the shape a function body has and the shape a multi-form `else` has, and it was
+// written out twice before. The reference implementation this borrows from keeps it as
+// `progn` for the same reason.
+static Obj *eval_but_last(void *root, Obj **env, Obj **list) {
+    DEFINE1(form);
+    for (; (*list)->cdr != Nil; *list = (*list)->cdr) {
+        *form = (*list)->car;
+        eval(root, env, form);
+    }
+    return (*list)->car;
+}
+
+// Chooses an `if` branch and returns it unevaluated, for the caller to evaluate in tail
+// position. The environment is unchanged: a branch is evaluated where the `if` stood.
+static Obj *if_branch(void *root, Obj **env, Obj **list) {
+    if (length(*list) < 2)
+        error("Malformed if");
+    DEFINE2(cond, els);
+    *cond = (*list)->car;
+    *cond = eval(root, env, cond);
+    if (*cond != Nil)
+        return (*list)->cdr->car;
+    *els = (*list)->cdr->cdr;
+    if (*els == Nil)
+        return Nil;
+    return eval_but_last(root, env, els);
+}
+
+// Registered as `if`. eval() recognises this function and takes the branch over itself so
+// that it lands in tail position; see the comment there.
+static Obj *prim_if(void *root, Obj **env, Obj **list);
+
 // Evaluates the S expression.
 //
 // Tail calls do not recurse. Where the value of a form is the value of another form --
@@ -1723,9 +1728,11 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
     *cur = *obj;
     *cenv = *env;
 
-    Obj *result = Nil;
     int iterations = 0;
 
+    // Each turn of the loop either produces the value, and returns it, or replaces what
+    // is being evaluated with the form whose value this one is, and breaks out of the
+    // switch to go round again. Those are the only two ways out.
     for (;;) {
         if (!is_valid_ptr(*cur))
             error("Unexpected statement. Evaluation terminated");
@@ -1737,16 +1744,14 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
         case TTRUE:
         case TNIL:
             // Self-evaluating objects
-            result = *cur;
-            goto done;
+            return *cur;
 
         case TSYMBOL: {
             // Variable
             Obj *bind = find(cenv, *cur);
             if (!bind)
                 error("Undefined symbol: %s", (*cur)->name);
-            result = bind->cdr;
-            goto done;
+            return bind->cdr;
         }
 
         case TCELL:
@@ -1766,19 +1771,20 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
                 error("argument must be a list");
 
             if ((*fn)->type == TPRIMITIVE) {
-                tail_pending = false;
-                result = (*fn)->fn(root, cenv, args);
-                if (!tail_pending)
-                    goto done;
-                // The primitive ended in an expression rather than a value. Taking it
-                // over here, instead of letting the primitive evaluate it, is what keeps
-                // an `if` branch a tail position.
-                *cur = tail_obj;
-                *cenv = tail_env;
-                tail_pending = false;
-                tail_obj = NULL;
-                tail_env = NULL;
-                break;
+                // `if` is the one primitive whose value is the value of another form, so
+                // its branch is taken over here rather than evaluated inside the
+                // primitive, which would put a frame under a tail call.
+                //
+                // Recognised by the C function it carries rather than by the object
+                // holding it: a function pointer is a fixed address, while the object
+                // moves under a copying collector and would need a root of its own. It is
+                // also the right test -- an alias of `if` is the same primitive and still
+                // gets tail treatment, while a genuine rebinding correctly does not.
+                if ((*fn)->fn == prim_if) {
+                    *cur = if_branch(root, cenv, args);
+                    break;
+                }
+                return (*fn)->fn(root, cenv, args);
             }
 
             // A function: bind the arguments, then go on with its body.
@@ -1787,18 +1793,9 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
             *newenv = (*fn)->env;
             *newenv = push_env(root, newenv, params, args);
             *body = (*fn)->body;
-            if (*body == Nil) {
-                result = Nil;
-                goto done;
-            }
-            // All but the last form are evaluated for their effect. The last one is the
-            // value of the call, so it is taken over here rather than evaluated in a
-            // frame of its own.
-            for (; (*body)->cdr != Nil; *body = (*body)->cdr) {
-                *cur = (*body)->car;
-                eval(root, newenv, cur);
-            }
-            *cur = (*body)->car;
+            if (*body == Nil)
+                return Nil;
+            *cur = eval_but_last(root, newenv, body);
             *cenv = *newenv;
             break;
 
@@ -1820,9 +1817,6 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
         if (cycle_yield)
             cycle_yield();
     }
-
-done:
-    return result;
 }
 
 //======================================================================
@@ -2177,36 +2171,13 @@ static Obj *prim_list(void *root, Obj **env, Obj **list) {
 }
 
 // (if expr expr expr ...)
+// eval() intercepts this and evaluates the branch in its own loop, so this body only
+// runs if `if` is ever applied by some other path. It gives the same answer, without the
+// tail benefit.
 static Obj *prim_if(void *root, Obj **env, Obj **list) {
-    if (length(*list) < 2)
-        error("Malformed if");
-    DEFINE3(cond, then, els);
-    *cond = (*list)->car;
-    *cond = eval(root, env, cond);
-    if (*cond != Nil) {
-        *then = (*list)->cdr->car;
-        // Handed back to eval() rather than evaluated here. This is the half of tail call
-        // elimination that matters in practice: the recursive call in
-        // (defun f (n) (if (= n 0) 0 (f (+ n -1)))) sits in the tail of the `if`, and
-        // evaluating it here would put a frame under it.
-        tail_obj = *then;
-        tail_env = *env;
-        tail_pending = true;
-        return Nil;
-    }
-    *els = (*list)->cdr->cdr;
-    if (*els == Nil)
-        return Nil;
-    // A multi-form else is a body: all but the last for its effect, the last in tail
-    // position like the then-branch.
-    for (; (*els)->cdr != Nil; *els = (*els)->cdr) {
-        *then = (*els)->car;
-        eval(root, env, then);
-    }
-    tail_obj = (*els)->car;
-    tail_env = *env;
-    tail_pending = true;
-    return Nil;
+    DEFINE1(branch);
+    *branch = if_branch(root, env, list);
+    return eval(root, env, branch);
 }
 
 // (not expr)
