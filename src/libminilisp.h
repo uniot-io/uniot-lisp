@@ -328,8 +328,18 @@ extern size_t eval_stack_max;
 #define MINILISP_GC_COPYING 1
 #define MINILISP_GC_MARK_SWEEP 2
 
+// Mark-sweep by default, and deliberately the same everywhere. The two collectors do
+// not merely differ in speed: they run out of memory under different conditions, so a
+// script that fits under one can fail under the other. Selecting per platform would mean
+// the same program behaving differently on different boards, and on the browser
+// simulator differently again from both. One collector everywhere is worth more than the
+// few percent the other is faster by.
+//
+// Mark-sweep is the one that fits the tightest target, which is what makes it the right
+// default for all of them: it needs no memory beyond the heap it already holds, so a
+// collection cannot fail for want of a contiguous block.
 #ifndef MINILISP_GC
-#define MINILISP_GC MINILISP_GC_COPYING
+#define MINILISP_GC MINILISP_GC_MARK_SWEEP
 #endif
 
 // Depth of the mark-sweep collector's explicit work stack, in entries. Marking may not

@@ -6,3 +6,4 @@ repl-mark-sweep
 repl-mark-sweep-small
 bench-copying
 bench-mark-sweep
+repl-copying

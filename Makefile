@@ -22,7 +22,12 @@ repl: repl.c src/libminilisp.c src/libminilisp.h
 	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ repl.c src/libminilisp.c
 
 # The same interpreter over the other collector. Everything above the strategy seam is
-# shared, so whatever the suite asks of one has to hold for the other.
+# shared, so whatever the suite asks of one has to hold for the other. Both are named
+# explicitly rather than one relying on the default, so that changing the default cannot
+# quietly leave the matrix testing the same collector twice.
+repl-copying: repl.c src/libminilisp.c src/libminilisp.h
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_COPYING -o $@ repl.c src/libminilisp.c
+
 repl-mark-sweep: repl.c src/libminilisp.c src/libminilisp.h
 	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ repl.c src/libminilisp.c
 
@@ -38,7 +43,7 @@ repl-mark-sweep-small: repl.c src/libminilisp.c src/libminilisp.h
 BENCH_CFLAGS=$(CFLAGS) -D MINILISP_GC_STATS=1
 
 bench-copying: bench.c src/libminilisp.c src/libminilisp.h
-	$(CC) $(BENCH_CFLAGS) -o $@ bench.c src/libminilisp.c
+	$(CC) $(BENCH_CFLAGS) -D MINILISP_GC=MINILISP_GC_COPYING -o $@ bench.c src/libminilisp.c
 
 bench-mark-sweep: bench.c src/libminilisp.c src/libminilisp.h
 	$(CC) $(BENCH_CFLAGS) -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ bench.c src/libminilisp.c
@@ -50,6 +55,7 @@ clean:
 	rm -f bench-copying
 	rm -f bench-mark-sweep
 	rm -f repl
+	rm -f repl-copying
 	rm -f repl-mark-sweep
 	rm -f repl-mark-sweep-small
 	rm -f build/*
@@ -63,9 +69,9 @@ test-mark-sweep: repl-mark-sweep
 # Every strategy, plainly and with the heap checked after each collection. Running the
 # suite without verification still matters: it is the only way a failure shows up as a
 # wrong answer rather than as an abort, which is what a user would actually see.
-test-gc: repl repl-mark-sweep repl-mark-sweep-small
-	@echo "--- copying ---"                 && ./test.sh
-	@echo "--- copying, verified ---"       && MINILISP_VERIFY_GC=1 ./test.sh
+test-gc: repl-copying repl-mark-sweep repl-mark-sweep-small
+	@echo "--- copying ---"                 && REPL=./repl-copying ./test.sh
+	@echo "--- copying, verified ---"       && MINILISP_VERIFY_GC=1 REPL=./repl-copying ./test.sh
 	@echo "--- mark-sweep ---"              && REPL=./repl-mark-sweep ./test.sh
 	@echo "--- mark-sweep, verified ---"    && MINILISP_VERIFY_GC=1 REPL=./repl-mark-sweep ./test.sh
 	@echo "--- mark-sweep, 1-entry stack ---" && MINILISP_VERIFY_GC=1 REPL=./repl-mark-sweep-small ./test.sh
