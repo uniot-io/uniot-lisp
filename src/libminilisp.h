@@ -318,12 +318,6 @@ extern LispStats lisp_stats;
 void lisp_stats_reset(void);
 #endif
 
-// Current eval nesting, and the deepest nesting reached since eval_depth_max was last
-// cleared. Statistics only -- nesting is not what the recursion guard measures. Clear
-// eval_depth_max yourself before a measurement and read it afterwards.
-extern int eval_depth;
-extern int eval_depth_max;
-
 // The most C stack a single evaluation has consumed since this was last cleared, in
 // bytes. This is the quantity the recursion guard is measured against, so it is the one
 // to read when choosing a limit for a target. Cleared by lisp_create().

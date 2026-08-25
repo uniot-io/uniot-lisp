@@ -23,11 +23,10 @@ const RED = '\x1b[1;31m'
 const RESET = '\x1b[0m'
 const HEAP = 8000
 const TASK_LIMIT = 200
-// The recursion guard is a stack budget in bytes, not a nesting count. Note that a WASM
-// build's frames are not an ESP8266's, so `stack_used` here does not predict what a
-// script will spend on a device; `depth_max` is reported alongside it because nesting at
-// least does not change with the architecture, which makes it the better of two
-// imperfect handles for estimating.
+// The recursion guard is a stack budget in bytes, not a nesting count. A WASM build's
+// frames are not an ESP8266's, so `stack_used` here does not predict what a script will
+// spend on a device -- it says what this build spent, and the guard is what enforces the
+// limit on each target.
 const EVAL_STACK = 8 * 1024
 
 let failures = 0
@@ -126,17 +125,16 @@ Module.onRuntimeInitialized = async () => {
     `expected an error naming the symbol and a negative size, got size=${r.size} ${r.raw}`)
 
   // The emulator reports what a script actually cost, so the editor can warn before a
-  // script is pushed to hardware. Both figures are carried: the stack the guard acts on,
-  // and the nesting a caller can compare against a board's own measured limit.
+  // script is pushed to hardware. Stack is the only figure now: nesting stopped tracking
+  // call depth once tail calls were eliminated, so it no longer meant anything a caller
+  // could act on.
   r = await evaluate('(+ 1 2)')
   check('meta reports eval cost',
     r.json && r.json.meta && r.json.meta.eval &&
-    typeof r.json.meta.eval.depth_max === 'number' &&
-    r.json.meta.eval.depth_max > 0 &&
     typeof r.json.meta.eval.stack_used === 'number' &&
     r.json.meta.eval.stack_used > 0 &&
     r.json.meta.eval.stack_limit === EVAL_STACK,
-    `expected meta.eval with positive depth_max and stack_used, and stack_limit ${EVAL_STACK}, got ${r.raw}`)
+    `expected meta.eval with positive stack_used and stack_limit ${EVAL_STACK}, got ${r.raw}`)
 
   // Recursion past the budget is refused rather than allowed to run the stack out. The
   // call is wrapped in an addition so that it is not in tail position: a tail call costs

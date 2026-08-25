@@ -177,10 +177,6 @@ static bool tail_pending = false;
 void __attribute((noreturn)) error(const char *fmt, ...) {
     cycle_in_progress = false;
 
-    // A longjmp out of a nested eval() skips its decrements, so the counter has to be
-    // cleared here rather than unwound.
-    eval_depth = 0;
-
     // A longjmp out of gc() would otherwise leave gc_running set forever: the next
     // collection would trip assert(!gc_running), or, in a build with NDEBUG, would
     // silently re-enter a half-finished collection.
@@ -1363,6 +1359,55 @@ static void skip_line(void) {
     }
 }
 
+// The most stack one evaluation has consumed, in bytes.
+size_t eval_stack_max = 0;
+
+// Stack budget for one evaluation, taken from lisp_create(). Zero means no limit.
+static size_t s_max_eval_stack = 0;
+
+// Where the stack stood when the current evaluation began, set by lisp_eval() and
+// safe_eval(). NULL when no evaluation is in progress, in which case nothing is
+// measured and nothing is enforced.
+static const char *s_stack_base = NULL;
+
+// Stack consumed since the evaluation began. Which way the stack grows is not fixed by
+// the C standard, so the distance is taken whichever way round it lies.
+static inline size_t eval_stack_used(const char *here) {
+    if (s_stack_base == NULL)
+        return 0;
+    return (s_stack_base > here) ? (size_t)(s_stack_base - here)
+                                 : (size_t)(here - s_stack_base);
+}
+
+// Marks the start of an evaluation. Returns the previous base so a caller that finds
+// itself nested inside another evaluation can put it back, rather than leaving the
+// outer one measuring from a frame that has since returned.
+static const char *eval_stack_begin(const char *here) {
+    const char *previous = s_stack_base;
+    s_stack_base = here;
+    return previous;
+}
+
+// Raises if the frame this is called from has taken the evaluation past its stack
+// budget.
+//
+// The reader and the printer both descend recursively through nested structure without
+// going through eval(), so the guard in eval() never sees them. On an ESP8266 a level of
+// reading costs 80 bytes against roughly 3200 available, which is about forty nested
+// parentheses before the stack is gone -- during parsing, before there is an evaluation
+// to guard. The budget is already known here, and lisp_eval() sets the base before it
+// reads, so both can be held to the same limit as everything else.
+static void check_stack_budget(const char *here, const char *what) {
+    if (s_stack_base == NULL || s_max_eval_stack == 0)
+        return;
+    const size_t used = eval_stack_used(here);
+    if (used > eval_stack_max)
+        eval_stack_max = used;
+    if (used > s_max_eval_stack)
+        error("%s too deeply nested: used %u bytes of stack, limit is %u",
+              what, (unsigned)used, (unsigned)s_max_eval_stack);
+}
+
 // Reads a list. Note that '(' has already been read.
 static Obj *read_list(void *root) {
     DEFINE3(obj, head, last);
@@ -1431,6 +1476,8 @@ static Obj *read_symbol(void *root, char c) {
 }
 
 Obj *read_expr(void *root) {
+    char stack_marker;
+    check_stack_budget(&stack_marker, "Input");
     for (;;) {
         int c = buffer_getchar();
         if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
@@ -1461,6 +1508,9 @@ Obj *read_expr(void *root) {
 
 // Prints the given object.
 int print_to_buf(char *buf, size_t size, int pos, Obj *obj) {
+    char stack_marker;
+    check_stack_budget(&stack_marker, "Value");
+
     switch (obj->type) {
     case TCELL:
         pos = printf_to_handler(buf, size, pos, "(");
@@ -1616,42 +1666,6 @@ static inline bool is_valid_ptr(const void *p) {
     return gc_owns(p);
 }
 
-// Current eval nesting, and the deepest nesting reached since eval_depth_max was
-// last cleared. Kept as statistics; the guard below measures stack, not nesting.
-// eval_depth is reset by error(), because a longjmp out of a nested eval skips the
-// decrements below.
-int eval_depth = 0;
-int eval_depth_max = 0;
-
-// The most stack one evaluation has consumed, in bytes.
-size_t eval_stack_max = 0;
-
-// Stack budget for one evaluation, taken from lisp_create(). Zero means no limit.
-static size_t s_max_eval_stack = 0;
-
-// Where the stack stood when the current evaluation began, set by lisp_eval() and
-// safe_eval(). NULL when no evaluation is in progress, in which case nothing is
-// measured and nothing is enforced.
-static const char *s_stack_base = NULL;
-
-// Stack consumed since the evaluation began. Which way the stack grows is not fixed by
-// the C standard, so the distance is taken whichever way round it lies.
-static inline size_t eval_stack_used(const char *here) {
-    if (s_stack_base == NULL)
-        return 0;
-    return (s_stack_base > here) ? (size_t)(s_stack_base - here)
-                                 : (size_t)(here - s_stack_base);
-}
-
-// Marks the start of an evaluation. Returns the previous base so a caller that finds
-// itself nested inside another evaluation can put it back, rather than leaving the
-// outer one measuring from a frame that has since returned.
-static const char *eval_stack_begin(const char *here) {
-    const char *previous = s_stack_base;
-    s_stack_base = here;
-    return previous;
-}
-
 // Evaluates the S expression.
 //
 // Tail calls do not recurse. Where the value of a form is the value of another form --
@@ -1664,11 +1678,7 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
     if (used > eval_stack_max)
         eval_stack_max = used;
 
-    if (++eval_depth > eval_depth_max)
-        eval_depth_max = eval_depth;
-
     if (s_max_eval_stack > 0 && used > s_max_eval_stack) {
-        // error() clears eval_depth before unwinding, so no decrement is owed here.
         // Raising needs stack of its own, which is why the budget must leave room for it.
         error("Recursion too deep: evaluation used %u bytes of stack, limit is %u",
               (unsigned)used, (unsigned)s_max_eval_stack);
@@ -1702,7 +1712,6 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
             error("Unexpected statement. Evaluation terminated. Bug: eval: Unknown tag type: %d",
                   (*obj)->type);
         }
-        --eval_depth;
         return value;
     }
 
@@ -1813,7 +1822,6 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
     }
 
 done:
-    --eval_depth;
     return result;
 }
 
@@ -2390,8 +2398,6 @@ void lisp_create(size_t size, size_t max_eval_stack)
             return;
         MEMORY_SIZE = size;
         s_max_eval_stack = max_eval_stack;
-        eval_depth = 0;
-        eval_depth_max = 0;
         eval_stack_max = 0;
         s_stack_base = NULL;
         if (gc_heap_create())

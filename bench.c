@@ -275,7 +275,6 @@ int main(int argc, char **argv)
     OUT("alloc_hops", "%u", (unsigned)best.alloc_hops);
     OUT("mark_stack_peak", "%u", (unsigned)best.mark_stack_peak);
     OUT("mark_rescues", "%u", (unsigned)best.mark_rescues);
-    OUT("eval_depth_max", "%u", (unsigned)eval_depth_max);
 #undef OUT
   }
 
