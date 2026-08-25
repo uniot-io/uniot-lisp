@@ -138,8 +138,10 @@ Module.onRuntimeInitialized = async () => {
     r.json.meta.eval.stack_limit === EVAL_STACK,
     `expected meta.eval with positive depth_max and stack_used, and stack_limit ${EVAL_STACK}, got ${r.raw}`)
 
-  // Recursion past the budget is refused rather than allowed to run the stack out.
-  r = await evaluate('(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 200)')
+  // Recursion past the budget is refused rather than allowed to run the stack out. The
+  // call is wrapped in an addition so that it is not in tail position: a tail call costs
+  // no stack and would never reach the guard.
+  r = await evaluate('(defun f (n) (if (= n 0) 0 (+ 1 (f (+ n -1))))) (f 200)')
   check('recursion guard',
     r.json && r.json.err && typeof r.json.err.msg === 'string' &&
     r.json.err.msg.includes('Recursion too deep'),
@@ -147,10 +149,17 @@ Module.onRuntimeInitialized = async () => {
 
   // And the guard is a budget, not a fixed depth: a shallower run of the same shape
   // stays inside it.
-  r = await evaluate('(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 3)')
+  r = await evaluate('(defun f (n) (if (= n 0) 0 (+ 1 (f (+ n -1))))) (f 3)')
   check('recursion within budget',
+    r.json && !r.json.err && r.json.out[r.json.out.length - 1] === '3',
+    `expected (f 3) to return 3, got ${r.raw}`)
+
+  // The same depth in tail position costs no stack at all, so it runs where the
+  // non-tail version above was refused.
+  r = await evaluate('(defun lp (n) (if (= n 0) 0 (lp (+ n -1)))) (lp 200)')
+  check('tail calls cost no stack',
     r.json && !r.json.err && r.json.out[r.json.out.length - 1] === '0',
-    `expected (f 3) to succeed, got ${r.raw}`)
+    `expected (lp 200) to succeed, got ${r.raw}`)
 
   // The module must still evaluate after the failures above.
   r = await evaluate('(+ 20 22)')

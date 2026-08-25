@@ -161,6 +161,19 @@ static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 }
 // TODO: --------------------------------------------------------------------
 
+// A tail expression handed back to eval() by a primitive that ends in one, so that eval
+// can loop instead of recursing. `prim_if` is the reason this exists: the recursive call
+// in (defun f (n) (if (= n 0) 0 (f (+ n -1)))) sits in the tail of an `if`, which sits in
+// the tail of the body, and unless both are tail positions the idiom gains nothing.
+//
+// These are collector roots. Nothing allocates between a primitive setting them and eval
+// consuming them, so today they could be left out of the root set -- but that is a
+// property of code elsewhere, and a later primitive that allocates on the way out would
+// break it silently under a moving collector. Rooting them costs two pointers.
+static Obj *tail_obj = NULL;
+static Obj *tail_env = NULL;
+static bool tail_pending = false;
+
 void __attribute((noreturn)) error(const char *fmt, ...) {
     cycle_in_progress = false;
 
@@ -172,6 +185,14 @@ void __attribute((noreturn)) error(const char *fmt, ...) {
     // collection would trip assert(!gc_running), or, in a build with NDEBUG, would
     // silently re-enter a half-finished collection.
     gc_running = false;
+
+    // Nothing can raise between a primitive setting a tail expression and eval() taking
+    // it, so these are already clear by the time anything unwinds. Cleared anyway, so
+    // that the invariant holds locally rather than depending on that being true of every
+    // primitive written from now on -- and so a dead object is not held by a root.
+    tail_pending = false;
+    tail_obj = NULL;
+    tail_env = NULL;
 
     va_list ap;
     va_start(ap, fmt);
@@ -437,6 +458,10 @@ static void *alloc_semispace() {
 // Copies the root objects.
 static void forward_root_objects(void *root) {
     Symbols = forward(Symbols);
+    if (tail_obj)
+        tail_obj = forward(tail_obj);
+    if (tail_env)
+        tail_env = forward(tail_env);
     for (void **frame = (void **)root; frame; frame = *(void ***)frame)
         for (int i = 1; frame[i] != ROOT_END; i++)
             if (frame[i])
@@ -674,6 +699,8 @@ static void gc_verify(void *root) {
             gc_verify_ref((const Obj *)frame[i], "root slot", 0);
 
     gc_verify_ref(Symbols, "the symbol table", 0);
+    gc_verify_ref(tail_obj, "the pending tail expression", 0);
+    gc_verify_ref(tail_env, "the pending tail environment", 0);
 }
 #endif  // MINILISP_GC_DEBUG
 
@@ -820,6 +847,8 @@ static void ms_mark(void *root) {
     mark_overflow = false;
 
     ms_mark_push(Symbols);
+    ms_mark_push(tail_obj);
+    ms_mark_push(tail_env);
     for (void **frame = (void **)root; frame; frame = *(void ***)frame)
         for (int i = 1; frame[i] != ROOT_END; i++)
             if (frame[i])
@@ -1232,6 +1261,8 @@ static void gc_verify(void *root) {
             gc_verify_ref((const Obj *)frame[i], "root slot", 0);
 
     gc_verify_ref(Symbols, "the symbol table", 0);
+    gc_verify_ref(tail_obj, "the pending tail expression", 0);
+    gc_verify_ref(tail_env, "the pending tail environment", 0);
 }
 #endif  // MINILISP_GC_DEBUG
 
@@ -1540,19 +1571,6 @@ static Obj *apply_func(void *root, Obj **env, Obj **fn, Obj **args) {
     return progn(root, newenv, body);
 }
 
-// Apply fn with args.
-static Obj *apply(void *root, Obj **env, Obj **fn, Obj **args) {
-    if (!is_list(*args))
-        error("argument must be a list");
-    if ((*fn)->type == TPRIMITIVE)
-        return (*fn)->fn(root, env, args);
-    if ((*fn)->type == TFUNCTION) {
-        DEFINE1(eargs);
-        *eargs = eval_list(root, env, args);
-        return apply_func(root, env, fn, eargs);
-    }
-    error("not supported");
-}
 
 // Searches for a variable by symbol. Returns null if not found.
 static Obj *find(Obj **env, Obj *sym) {
@@ -1598,8 +1616,6 @@ static inline bool is_valid_ptr(const void *p) {
     return gc_owns(p);
 }
 
-static Obj *eval_inner(void *root, Obj **env, Obj **obj);
-
 // Current eval nesting, and the deepest nesting reached since eval_depth_max was
 // last cleared. Kept as statistics; the guard below measures stack, not nesting.
 // eval_depth is reset by error(), because a longjmp out of a nested eval skips the
@@ -1637,10 +1653,12 @@ static const char *eval_stack_begin(const char *here) {
 }
 
 // Evaluates the S expression.
+//
+// Tail calls do not recurse. Where the value of a form is the value of another form --
+// the last expression of a function body, the branch an `if` chose -- the loop below
+// rewrites what it is evaluating and goes round again. A tail-recursive function
+// therefore costs one frame however far it goes. Everything else still recurses.
 Obj *eval(void *root, Obj **env, Obj **obj) {
-    // Taking the address of a local is the cheapest way to read the stack pointer, and
-    // it costs one comparison per eval. Measuring here rather than counting levels means
-    // an expensive level -- one that prints, say -- is charged what it actually costs.
     char stack_marker;
     const size_t used = eval_stack_used(&stack_marker);
     if (used > eval_stack_max)
@@ -1655,46 +1673,148 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
         error("Recursion too deep: evaluation used %u bytes of stack, limit is %u",
               (unsigned)used, (unsigned)s_max_eval_stack);
     }
-    Obj *result = eval_inner(root, env, obj);
-    --eval_depth;
-    return result;
-}
 
-static Obj *eval_inner(void *root, Obj **env, Obj **obj) {
     if (!is_valid_ptr(*obj))
         error("Unexpected statement. Evaluation terminated");
 
-    switch ((*obj)->type) {
-    case TINT:
-    case TPRIMITIVE:
-    case TFUNCTION:
-    case TTRUE:
-    case TNIL:
-        // Self-evaluating objects
-        return *obj;
-    case TSYMBOL: {
-        // Variable
-        Obj *bind = find(env, *obj);
-        if (!bind)
-            error("Undefined symbol: %s", (*obj)->name);
-        return bind->cdr;
+    // Anything that is not a list is its own value or a variable lookup, and needs
+    // neither roots nor a loop. This is most of what eval sees -- every argument, every
+    // condition, every literal -- so it is worth taking before the root frame below is
+    // built, which would otherwise be paid for on every one of them.
+    if ((*obj)->type != TCELL) {
+        Obj *value;
+        switch ((*obj)->type) {
+        case TINT:
+        case TPRIMITIVE:
+        case TFUNCTION:
+        case TTRUE:
+        case TNIL:
+            value = *obj;
+            break;
+        case TSYMBOL: {
+            Obj *bind = find(env, *obj);
+            if (!bind)
+                error("Undefined symbol: %s", (*obj)->name);
+            value = bind->cdr;
+            break;
+        }
+        default:
+            error("Unexpected statement. Evaluation terminated. Bug: eval: Unknown tag type: %d",
+                  (*obj)->type);
+        }
+        --eval_depth;
+        return value;
     }
-    case TCELL: {
-        // Function application form
-        DEFINE3(fn, expanded, args);
-        *expanded = macroexpand(root, env, obj);
-        if (*expanded != *obj)
-            return eval(root, env, expanded);
-        *fn = (*obj)->car;
-        *fn = eval(root, env, fn);
-        *args = (*obj)->cdr;
-        if ((*fn)->type != TPRIMITIVE && (*fn)->type != TFUNCTION)
-            error("The head of a list must be a function");
-        return apply(root, env, fn, args);
+
+    // Every root this function needs, declared once and before the loop. ADD_ROOT links
+    // the frame it declares into the chain and reassigns `root`, so declaring any of
+    // these inside the loop would link a frame to itself and the collector would walk the
+    // chain forever.
+    DEFINE8(cur, cenv, fn, args, expanded, params, newenv, body);
+    *cur = *obj;
+    *cenv = *env;
+
+    Obj *result = Nil;
+    int iterations = 0;
+
+    for (;;) {
+        if (!is_valid_ptr(*cur))
+            error("Unexpected statement. Evaluation terminated");
+
+        switch ((*cur)->type) {
+        case TINT:
+        case TPRIMITIVE:
+        case TFUNCTION:
+        case TTRUE:
+        case TNIL:
+            // Self-evaluating objects
+            result = *cur;
+            goto done;
+
+        case TSYMBOL: {
+            // Variable
+            Obj *bind = find(cenv, *cur);
+            if (!bind)
+                error("Undefined symbol: %s", (*cur)->name);
+            result = bind->cdr;
+            goto done;
+        }
+
+        case TCELL:
+            // Function application form
+            *expanded = macroexpand(root, cenv, cur);
+            if (*expanded != *cur) {
+                // The expansion stands where the form stood, in the same tail position.
+                *cur = *expanded;
+                break;
+            }
+            *fn = (*cur)->car;
+            *fn = eval(root, cenv, fn);
+            *args = (*cur)->cdr;
+            if ((*fn)->type != TPRIMITIVE && (*fn)->type != TFUNCTION)
+                error("The head of a list must be a function");
+            if (!is_list(*args))
+                error("argument must be a list");
+
+            if ((*fn)->type == TPRIMITIVE) {
+                tail_pending = false;
+                result = (*fn)->fn(root, cenv, args);
+                if (!tail_pending)
+                    goto done;
+                // The primitive ended in an expression rather than a value. Taking it
+                // over here, instead of letting the primitive evaluate it, is what keeps
+                // an `if` branch a tail position.
+                *cur = tail_obj;
+                *cenv = tail_env;
+                tail_pending = false;
+                tail_obj = NULL;
+                tail_env = NULL;
+                break;
+            }
+
+            // A function: bind the arguments, then go on with its body.
+            *args = eval_list(root, cenv, args);
+            *params = (*fn)->params;
+            *newenv = (*fn)->env;
+            *newenv = push_env(root, newenv, params, args);
+            *body = (*fn)->body;
+            if (*body == Nil) {
+                result = Nil;
+                goto done;
+            }
+            // All but the last form are evaluated for their effect. The last one is the
+            // value of the call, so it is taken over here rather than evaluated in a
+            // frame of its own.
+            for (; (*body)->cdr != Nil; *body = (*body)->cdr) {
+                *cur = (*body)->car;
+                eval(root, newenv, cur);
+            }
+            *cur = (*body)->car;
+            *cenv = *newenv;
+            break;
+
+        default:
+            error("Unexpected statement. Evaluation terminated. Bug: eval: Unknown tag type: %d", (*cur)->type);
+        }
+
+        // Going round again is a loop, and an unbounded one would spin here rather than
+        // run out of stack, which is how it used to end. Bounded as `while` is.
+        if (++iterations > MAX_LOOP_ITERATIONS)
+            error("Maximum loop iterations (%d) exceeded. Possible infinite loop detected.",
+                  MAX_LOOP_ITERATIONS);
+
+        // Fed on every pass, as `while` does. Throttling this to every 64th pass was
+        // measured and recovered 0.2%, which is noise -- yielding is not what a tail call
+        // costs. It is not free of consequence either: a pass here evaluates every
+        // non-tail form of a function body, which is arbitrary work, so skipping 63 of
+        // them could leave the watchdog unfed for as long as 63 bodies take.
+        if (cycle_yield)
+            cycle_yield();
     }
-    default:
-        error("Unexpected statement. Evaluation terminated. Bug: eval: Unknown tag type: %d", (*obj)->type);
-    }
+
+done:
+    --eval_depth;
+    return result;
 }
 
 //======================================================================
@@ -2057,10 +2177,28 @@ static Obj *prim_if(void *root, Obj **env, Obj **list) {
     *cond = eval(root, env, cond);
     if (*cond != Nil) {
         *then = (*list)->cdr->car;
-        return eval(root, env, then);
+        // Handed back to eval() rather than evaluated here. This is the half of tail call
+        // elimination that matters in practice: the recursive call in
+        // (defun f (n) (if (= n 0) 0 (f (+ n -1)))) sits in the tail of the `if`, and
+        // evaluating it here would put a frame under it.
+        tail_obj = *then;
+        tail_env = *env;
+        tail_pending = true;
+        return Nil;
     }
     *els = (*list)->cdr->cdr;
-    return *els == Nil ? Nil : progn(root, env, els);
+    if (*els == Nil)
+        return Nil;
+    // A multi-form else is a body: all but the last for its effect, the last in tail
+    // position like the then-branch.
+    for (; (*els)->cdr != Nil; *els = (*els)->cdr) {
+        *then = (*els)->car;
+        eval(root, env, then);
+    }
+    tail_obj = (*els)->car;
+    tail_env = *env;
+    tail_pending = true;
+    return Nil;
 }
 
 // (not expr)

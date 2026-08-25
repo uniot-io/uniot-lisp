@@ -262,11 +262,35 @@ run gc-churn 55 "
   (defun f (x) (if (= x 0) 0 (+ (f (+ x -1)) x)))
   (f 10)"
 
+# A call in tail position must not grow the stack. The budget here is a fraction of what
+# a thousand nested frames would need, so this fails the moment a tail position stops
+# being one -- which is exactly what happened when `if` still evaluated its own branch.
+MINILISP_MAX_EVAL_STACK=4096 run tail-calls 0 \
+  '(defun lp (n) (if (= n 0) 0 (lp (+ n -1)))) (lp 1000)'
+
+# The last form of a multi-form else is a tail position too.
+MINILISP_MAX_EVAL_STACK=4096 run tail-calls-in-else 0 \
+  '(defun lp (n) (if (= n 0) 0 (print n) (lp (+ n -1)))) (lp 300)'
+
+# The last form of a function body, with earlier forms evaluated for effect.
+MINILISP_MAX_EVAL_STACK=4096 run tail-calls-in-body 0 \
+  '(defun lp (n) (setq n (+ n -1)) (if (= n 0) 0 (lp n))) (lp 500)'
+
+# Recursion that is not in tail position still has to be refused: the frames are real.
+run_error "non-tail recursion still bounded" "Recursion too deep" \
+  '(defun d (n) (if (= n 0) 0 (+ 1 (d (+ n -1))))) (d 1000)' 4096
+
+# A tail call that never returns is a loop, and is bounded like one. Before tail calls
+# were eliminated this ran out of stack instead, which is not something to rely on.
+run_error "runaway tail call" "Maximum loop iterations" '(defun r (n) (r (+ n 1))) (r 0)'
+
 # Recursion guard: deep recursion must raise rather than overrun the C stack.
 # A budget far below what fifty nested calls need, so the guard raises rather than the
-# stack running out. The figure is in bytes and is deliberately tiny: what matters is
-# that the limit is enforced, not where it sits.
-run_error "eval stack guard" "Recursion too deep" '(defun f (n) (if (= n 0) 0 (f (+ n -1)))) (f 50)' 512
+# stack running out. The recursion is deliberately not in tail position -- wrapped in an
+# addition -- because a tail call costs no stack at all and would leave this passing for
+# the wrong reason.
+run_error "eval stack guard" "Recursion too deep" \
+  '(defun f (n) (if (= n 0) 0 (+ 1 (f (+ n -1))))) (f 50)' 4096
 
 if [ "$FAILURES" -ne 0 ]; then
   echo -e "\n$FAILURES check(s) failed"
