@@ -44,7 +44,55 @@ extern "C" {
 // it is the one a user notices.
 #define LISP_PRINT_MAX_LEN 256
 
-#define MAX_LOOP_ITERATIONS 9999
+// Two bounds, not one, because there are two ways for a script to repeat forever and
+// they are not the same shape. A `while` whose condition never goes false spins inside
+// prim_while; a tail-recursive function that never reaches a base case spins inside a
+// single eval() frame. Each is caught where it happens.
+//
+// What neither of these counts is work. A count of everything eval does cannot tell a
+// program that is stuck from one that is merely large -- eight queens is two and a half
+// million evaluations with nothing whatever wrong with it, and it contains no loop at
+// all. So these bound repetition of a construct, not the total cost of a program.
+
+// Iterations of `while`, summed across every loop in the top-level form rather than
+// counted per loop. Per loop means nothing: a loop inside a loop multiplies while both
+// stay under their own limit, and two nested 9999s are 10^8 iterations. Summing the
+// inner loop's iterations over every pass of the outer one is that product.
+//
+// The number is a length of time in disguise, so it was measured rather than guessed.
+// One iteration on an ESP8266 at 80MHz, from tools/LispGC in uniot-core:
+//
+//   empty body                41 us      a bare (while c 1)
+//   (setq n (+ n 1))          78 us      arithmetic and a rebinding
+//   a call to a function     112 us      what a rule of any substance does
+//
+// so this is between 0.8 and 2.2 seconds of a device sitting on a loop that is never
+// going to end. A workstation is 130 to 150 times faster per iteration, which is why
+// picking this from host timings does not work: 100000 measures as a second there and
+// as four to eleven on the hardware it is meant to protect.
+//
+// Generous against what a loop legitimately does rather than against the clock. The
+// largest real nest to be found on a device is a scan of something like a 100x100 grid,
+// which is 10000, and this leaves room over it.
+#ifndef MINILISP_MAX_LOOP_ITERATIONS
+#define MINILISP_MAX_LOOP_ITERATIONS 20000
+#endif
+
+// Tail calls made without leaving one eval() frame. Eliminating tail calls turned them
+// into a loop inside that frame, which cost them the guard they used to have: a runaway
+// tail call no longer runs out of stack, it just spins. This is what replaces it.
+//
+// The count lives in the frame because that is exactly where a runaway lives too. A
+// chain that never reaches a base case never leaves the frame, so its count never
+// starts over and it always trips. Ordinary recursion returns, and every return is a
+// frame gone and a count with it, so calling one function a million times costs nothing
+// here -- which is the whole point, and what a count of work got wrong.
+//
+// Passes, not iterations: an `if` around the recursive call is itself a tail position and
+// costs one, so a tail-recursive loop gets through roughly half this number of turns.
+#ifndef MINILISP_MAX_TAIL_CALLS
+#define MINILISP_MAX_TAIL_CALLS MINILISP_MAX_LOOP_ITERATIONS
+#endif
 
 #define ROOT_END ((void *)-1)
 

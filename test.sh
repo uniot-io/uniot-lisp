@@ -37,6 +37,45 @@ function run() {
   fi
 }
 
+# The counter tests below run millions of iterations, which is the only way to reach a
+# limit measured in the hundreds of thousands. That is quick on its own and ruinous with
+# a collection and a full heap verification on every allocation -- one of them takes 27
+# seconds in the slowest configuration, and the matrix runs the suite five times. They
+# test the counters, not the collector, so they are run once, plainly, and skipped where
+# the collector is the thing under test.
+SLOW_OK=1
+if [ -n "$MINILISP_VERIFY_GC" ] || [ -n "$MINILISP_ALWAYS_GC" ]; then
+  SLOW_OK=
+fi
+
+function run_slow() {
+  if [ -z "$SLOW_OK" ]; then return 0; fi
+  MINILISP_ALWAYS_GC= run "$@"
+}
+
+function run_error_slow() {
+  if [ -z "$SLOW_OK" ]; then return 0; fi
+  run_error "$@"
+}
+
+# Runs code whose earlier forms raise on purpose, and checks the last value printed.
+# `run` treats any output on stderr as a failure, which is what makes it useless for
+# checking what survives an error.
+#   $1 name, $2 expected last line, $3 code
+function run_after_error() {
+  echo -n "Testing $1 ... "
+  local before=$FAILURES
+  local result
+  result=$(echo "$3" | "$REPL" 2>/dev/null | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g" | tail -1)
+  if [ "$result" != "$2" ]; then
+    echo FAILED
+    fail "$2 expected, but got $result"
+  fi
+  if [ "$FAILURES" -eq "$before" ]; then
+    echo ok
+  fi
+}
+
 # Runs code that is expected to raise, and checks the message.
 #   $1 name, $2 expected substring, $3 code, $4 optional eval stack budget in bytes
 function run_error() {
@@ -341,7 +380,46 @@ run_error "non-tail recursion still bounded" "Recursion too deep" \
 
 # A tail call that never returns is a loop, and is bounded like one. Before tail calls
 # were eliminated this ran out of stack instead, which is not something to rely on.
-run_error "runaway tail call" "Maximum loop iterations" '(defun r (n) (r (+ n 1))) (r 0)'
+run_error_slow "runaway tail call" "without returning" '(defun r (n) (r (+ n 1))) (r 0)'
+
+# Nested loops, which were refused outright while a single global counter enforced the
+# limit. #itr is the innermost loop's iteration and is put back on the way out.
+run nested-while 24 \
+  '(define n 0) (while (< #itr 2) (while (< #itr 3) (while (< #itr 4) (setq n (+ n 1))))) n'
+
+# A loop that never ends, whatever it is nested in. The iteration count is summed over
+# the whole nest, so an inner loop cannot hide behind an outer one's limit: neither of
+# these two reaches 200 alone, and together they are 40000.
+run_error_slow "runaway while" "without ending" '(while #t 1)'
+run_error_slow "runaway nested while" "without ending" '(while #t (while (< #itr 10) 1))'
+run_error_slow "nested loops multiply" "without ending" '(while (< #itr 200) (while (< #itr 200) 1))'
+
+# Loops that merely follow one another do not multiply, and must not be charged for one
+# another. Each of these is just under the limit; summing them would refuse the pair.
+run_slow sequential-loops "()" '(progn (while (< #itr 19999) 1) (while (< #itr 19999) 1))'
+
+# #itr belongs to the loop running now, and there is none once it ends. An error thrown
+# out of a loop skips every bit of cleanup prim_while does, so the state is cleared where
+# evaluation begins instead -- this is the case that catches it if that stops happening.
+run itr-cleared-after-loop 0 '(while (< #itr 5) 1) #itr'
+run_after_error itr-cleared-after-error 0 '(while (< #itr 5) (car 1))
+#itr'
+
+# The counters bound repetition, not work. Naive fib makes hundreds of thousands of
+# calls, but no one chain of them repeats without end, so nothing here is bounded by
+# either counter. A count of everything eval does -- which is what this replaced --
+# refused programs of exactly this shape, eight queens among them.
+run_slow heavy-recursion 10946 \
+  '(defun fib (n) (if (< n 2) n (+ (fib (+ n -1)) (fib (+ n -2))))) (fib 21)'
+
+# A tail-recursive loop is a loop, and is held to the same count as `while`. Under it
+# is fine; the runaway test above is the same shape with no end.
+run_slow long-tail-loop 40504500 \
+  '(defun sum (n acc) (if (= n 0) acc (sum (+ n -1) (+ acc n)))) (sum 9000 0)'
+
+# Redefinition rebinds rather than raising, as it does everywhere else in this family.
+run redefine-value 2 '(define a 1) (define a 2) a'
+run redefine-function 2 '(defun f (x) 1) (defun f (x) 2) (f 0)'
 
 # Recursion guard: deep recursion must raise rather than overrun the C stack.
 # A budget far below what fifty nested calls need, so the guard raises rather than the

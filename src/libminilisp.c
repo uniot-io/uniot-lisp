@@ -32,7 +32,18 @@
 // TODO: add comments ------------------------------------------------------
 size_t MEMORY_SIZE = 4000; // default value
 
-static bool cycle_in_progress = false;
+// Iterations of the loop nest being run, summed over every loop in it however deeply
+// nested. Nesting is what needs bounding, because an inner loop runs afresh on every
+// pass of the outer one and the two multiply. Loops that merely follow one another only
+// add, so each outermost loop starts with the count whole.
+static long loops_done = 0;
+static int loop_depth = 0;
+
+static void loop_iterated(void) {
+    if (++loops_done > MINILISP_MAX_LOOP_ITERATIONS)
+        error("Loop ran for %d iterations without ending; possible endless loop",
+              MINILISP_MAX_LOOP_ITERATIONS);
+}
 
 static yield_def cycle_yield = NULL;
 static print_def print_out = NULL;
@@ -162,7 +173,11 @@ static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 // TODO: --------------------------------------------------------------------
 
 void __attribute((noreturn)) error(const char *fmt, ...) {
-    cycle_in_progress = false;
+    // Nothing to do for the loop counters. The tail-call count is a local and goes with
+    // the frame; the loop count and depth are cleared where the next evaluation begins,
+    // which is reached by exactly this jump. Clearing them here as well would be a
+    // second place to keep right, and the wrong one -- a nested evaluation that catches
+    // its own error must not wipe the state of the loop that called it.
 
     // A longjmp out of gc() would otherwise leave gc_running set forever: the next
     // collection would trip assert(!gc_running), or, in a build with NDEBUG, would
@@ -1771,7 +1786,8 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
     *cur = *obj;
     *cenv = *env;
 
-    int iterations = 0;
+    // Tail calls made without leaving this frame. See MINILISP_MAX_TAIL_CALLS.
+    long tail_calls = 0;
 
     // Each turn of the loop either produces the value, and returns it, or replaces what
     // is being evaluated with the form whose value this one is, and breaks out of the
@@ -1877,10 +1893,12 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
         }
 
         // Going round again is a loop, and an unbounded one would spin here rather than
-        // run out of stack, which is how it used to end. Bounded as `while` is.
-        if (++iterations > MAX_LOOP_ITERATIONS)
-            error("Maximum loop iterations (%d) exceeded. Possible infinite loop detected.",
-                  MAX_LOOP_ITERATIONS);
+        // run out of stack, which is how it used to end. The count lives in this frame,
+        // so it measures one chain of tail calls that never returns -- not how much work
+        // the program has done, which is not the interpreter's business to judge.
+        if (++tail_calls > MINILISP_MAX_TAIL_CALLS)
+            error("Tail call repeated %d times without returning; possible endless recursion",
+                  MINILISP_MAX_TAIL_CALLS);
 
         // Fed on every pass, as `while` does. Throttling this to every 64th pass was
         // measured and recovered 0.2%, which is noise -- yielding is not what a tail call
@@ -1977,29 +1995,39 @@ static Obj *prim_setcdr(void *root, Obj **env, Obj **list) {
 
 // (while cond expr ...)
 static Obj *prim_while(void *root, Obj **env, Obj **list) {
-    if (cycle_in_progress)
-        error("Nested loops are prohibited");
     if (length(*list) < 2)
         error("Malformed while");
-    cycle_in_progress = true;
     DEFINE3(cond, exprs, itr);
     *cond = (*list)->car;
     *itr = get_variable(root, env, "#itr");
+
+    // Loops nest, so the counter is saved and put back: #itr is the innermost loop's
+    // iteration. Bind it to a variable first if an inner loop needs the outer one's.
+    // Nesting used to be refused outright because a single global counter would be
+    // clobbered, and it was also what enforced the iteration limit.
+    const int outer_itr = (*itr)->cdr->value;
     (*itr)->cdr->value = 0;
+
+    // Only a nest shares a budget. Charging one loop for what the loop before it spent
+    // would refuse (progn (while ...) (while ...)) for doing twice the work of something
+    // allowed on its own, which is the same mistake as counting work in the first place.
+    if (loop_depth == 0)
+        loops_done = 0;
+    loop_depth++;
+
     while (eval(root, env, cond) != Nil) {
         *exprs = (*list)->cdr;
         eval_list(root, env, exprs);
         (*itr)->cdr->value++;
 
-        if ((*itr)->cdr->value > MAX_LOOP_ITERATIONS) {
-            cycle_in_progress = false;
-            error("Maximum loop iterations (%d) exceeded. Possible infinite loop detected.", MAX_LOOP_ITERATIONS);
-        }
+        loop_iterated();
 
         if (cycle_yield)
             cycle_yield();
     }
-    cycle_in_progress = false;
+
+    loop_depth--;
+    (*itr)->cdr->value = outer_itr;
     return Nil;
 }
 
@@ -2217,14 +2245,18 @@ static Obj *handle_defun(void *root, Obj **env, Obj **list, int type) {
     // literal whose union is zero filled.
     if ((*list)->type != TCELL || (*list)->car->type != TSYMBOL || (*list)->cdr->type != TCELL)
         error("Malformed %s", type == TMACRO ? "defmacro" : "defun");
-    DEFINE4(fn, sym, rest, bind);
+    DEFINE3(fn, sym, rest);
     *sym = (*list)->car;
     *rest = (*list)->cdr;
-    *bind = find(env, *sym);
-    if (*bind)
-        error("Already defined: %s", (*sym)->name);
     *fn = handle_function(root, env, rest, type);
-    add_variable(root, env, sym, fn);
+
+    // Redefinition rebinds, as it does in every Lisp this borrows its names from. See
+    // prim_define for why it must not shadow instead.
+    Obj *bind = find(env, *sym);
+    if (bind)
+        bind->cdr = *fn;
+    else
+        add_variable(root, env, sym, fn);
     return *fn;
 }
 
@@ -2237,14 +2269,19 @@ static Obj *prim_defun(void *root, Obj **env, Obj **list) {
 static Obj *prim_define(void *root, Obj **env, Obj **list) {
     if (length(*list) != 2 || (*list)->car->type != TSYMBOL)
         error("Malformed define");
-    DEFINE3(sym, value, bind);
+    DEFINE2(sym, value);
     *sym = (*list)->car;
     *value = (*list)->cdr->car;
-    *bind = find(env, *sym);
-    if (*bind)
-        error("Already defined: %s", (*sym)->name);
     *value = eval(root, env, value);
-    add_variable(root, env, sym, value);
+
+    // Looked up after evaluating, so nothing moves under the pointer. Rebinding replaces
+    // the value in the pair that is already there, which leaves the old value collectable;
+    // adding a second pair would shadow it and keep it reachable from a root for ever.
+    Obj *bind = find(env, *sym);
+    if (bind)
+        bind->cdr = *value;
+    else
+        add_variable(root, env, sym, value);
     return *value;
 }
 
@@ -2273,10 +2310,18 @@ static Obj *prim_print(void *root, Obj **env, Obj **list) {
     else
         *tmp = eval(root, env, &(*list)->car);
 
+    // The log sink only. What a script deliberately prints and what its forms happen to
+    // evaluate to are two different things, and the host keeps them apart -- on a device
+    // they are separate channels. Writing to both here collapsed that distinction and
+    // put every printed line into the value stream as well.
     const int len = print_to_buf(s_value_buf, sizeof(s_value_buf), 0, *tmp);
-    write_out(s_value_buf, len);
     write_log(s_value_buf, len);
-    return Nil;
+
+    // The object printed, as Emacs Lisp returns, so print can sit inside a larger form
+    // without swallowing its argument. A top-level (print 1) does appear twice -- once
+    // from here and once as the value of the form -- but those are two different sinks
+    // on a device, script output and the value echo, and both are meant to show it.
+    return *tmp;
 }
 
 // (eval 'expr)
@@ -2584,6 +2629,17 @@ bool lisp_is_created()
     return s_heap_created;
 }
 
+// Loop state does not unwind. An error thrown from inside a loop jumps past the end of
+// prim_while, so the depth it was keeping is never decremented and #itr keeps whatever
+// iteration it had failed on. Clearing all of it where evaluation starts is what makes
+// that safe, and is why prim_while needs no cleanup on its error path.
+static void reset_loop_state(void *root, Obj **env)
+{
+    loops_done = 0;
+    loop_depth = 0;
+    get_variable(root, env, "#itr")->cdr->value = 0;
+}
+
 bool lisp_eval(void *root, Obj **env, const char *code)
 {
     current_buffer = code;
@@ -2607,6 +2663,12 @@ bool lisp_eval(void *root, Obj **env, const char *code)
         if (setjmp(error_jumper) == 0)
         {
             error_jumper_valid = true;
+
+            // A form evaluated inside a running evaluation leaves the loop state alone,
+            // so a host callback cannot clear the state of the loop that called it.
+            if (!outer_valid)
+                reset_loop_state(root, env);
+
             *expr = read_expr(root);
             if (!*expr) {
                 result = true;
@@ -2648,6 +2710,8 @@ bool safe_eval(void *root, Obj **env, Obj **expr)
     if (setjmp(error_jumper) == 0)
     {
         error_jumper_valid = true;
+        if (!outer_valid)
+            reset_loop_state(root, env);
         const int len = print_to_buf(s_value_buf, sizeof(s_value_buf), 0,
                                      eval(root, env, expr));
         write_out(s_value_buf, len);
