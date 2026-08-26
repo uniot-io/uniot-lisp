@@ -81,17 +81,16 @@ extern "C" {
 // Note that ADD_ROOT reassigns `root` to the frame it declares, so none of these may be
 // used inside a loop body: a second pass would link the frame to itself and the
 // collector's walk of the root chain would never terminate. Declare them before the
-// loop. eval() needs eight for exactly that reason.
-#define DEFINE8(var1, var2, var3, var4, var5, var6, var7, var8) \
-    ADD_ROOT(8);                               \
+// loop. eval() needs seven for exactly that reason.
+#define DEFINE7(var1, var2, var3, var4, var5, var6, var7) \
+    ADD_ROOT(7);                               \
     Obj **var1 = (Obj **)(root_ADD_ROOT_ + 1); \
     Obj **var2 = (Obj **)(root_ADD_ROOT_ + 2); \
     Obj **var3 = (Obj **)(root_ADD_ROOT_ + 3); \
     Obj **var4 = (Obj **)(root_ADD_ROOT_ + 4); \
     Obj **var5 = (Obj **)(root_ADD_ROOT_ + 5); \
     Obj **var6 = (Obj **)(root_ADD_ROOT_ + 6); \
-    Obj **var7 = (Obj **)(root_ADD_ROOT_ + 7); \
-    Obj **var8 = (Obj **)(root_ADD_ROOT_ + 8)
+    Obj **var7 = (Obj **)(root_ADD_ROOT_ + 7)
 
 #include <assert.h>
 #include <ctype.h>

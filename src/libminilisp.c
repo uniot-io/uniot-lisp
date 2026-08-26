@@ -1724,7 +1724,7 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
     // the frame it declares into the chain and reassigns `root`, so declaring any of
     // these inside the loop would link a frame to itself and the collector would walk the
     // chain forever.
-    DEFINE8(cur, cenv, fn, args, expanded, params, newenv, body);
+    DEFINE7(cur, cenv, fn, args, params, newenv, body);
     *cur = *obj;
     *cenv = *env;
 
@@ -1755,15 +1755,31 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
         }
 
         case TCELL:
-            // Function application form
-            *expanded = macroexpand(root, cenv, cur);
-            if (*expanded != *cur) {
-                // The expansion stands where the form stood, in the same tail position.
-                *cur = *expanded;
-                break;
-            }
+            // Function application form.
             *fn = (*cur)->car;
-            *fn = eval(root, cenv, fn);
+            if ((*fn)->type == TSYMBOL) {
+                // One lookup answers both questions -- is the head a macro, and if not
+                // what function is it. Asking macroexpand() first and then evaluating the
+                // head walked the environment twice for the same symbol, which was about
+                // a third of all the lookups this interpreter did.
+                //
+                // `bind` is not rooted because nothing allocates between finding it and
+                // reading its value into the rooted slot below.
+                Obj *bind = find(cenv, *fn);
+                if (!bind)
+                    error("Undefined symbol: %s", (*fn)->name);
+                *fn = bind->cdr;
+                if ((*fn)->type == TMACRO) {
+                    *args = (*cur)->cdr;
+                    // The expansion stands where the form stood, in the same tail
+                    // position.
+                    *cur = apply_func(root, cenv, fn, args);
+                    break;
+                }
+            } else {
+                // A head that is not a symbol has to be evaluated, as in ((lambda ...) x).
+                *fn = eval(root, cenv, fn);
+            }
             *args = (*cur)->cdr;
             if ((*fn)->type != TPRIMITIVE && (*fn)->type != TFUNCTION)
                 error("The head of a list must be a function");
