@@ -17,23 +17,66 @@
  */
 
 #include "libminilisp.h"
+#include "line_edit.h"
+
+#include <signal.h>
+#include <unistd.h>
 
 #define ANSI_COLOR_RED "\x1b[31m"
 #define ANSI_COLOR_GREEN "\x1b[32m"
+#define ANSI_COLOR_CYAN "\x1b[36m"
 #define ANSI_COLOR_RESET "\x1b[0m"
 
 void *env_constructor[3];
 void *root = NULL;
 Obj **genv;
 
+// Three sinks, three colours, because they are three different things and telling them
+// apart at a glance is the whole reason the library keeps them separate. Green is the
+// value a form evaluated to, cyan is what the script asked to print, red is a failure.
+// On a device these are separate channels; here they are one terminal, so colour is
+// what stands in for that.
+// The reset goes before the newline, not after it. After it, the colour is still in
+// force at the moment the line ends, and anything that reaches the terminal before the
+// reset does -- a prompt, another stream -- comes out wearing it.
 void printOut(const char *msg, int size)
 {
-  fprintf(stdout, ANSI_COLOR_GREEN "%s\n" ANSI_COLOR_RESET, msg);
+  fprintf(stdout, ANSI_COLOR_GREEN "%s" ANSI_COLOR_RESET "\n", msg);
+}
+
+void printLog(const char *msg, int size)
+{
+  fprintf(stdout, ANSI_COLOR_CYAN "%s" ANSI_COLOR_RESET "\n", msg);
 }
 
 void printErr(const char *msg, int size)
 {
-  fprintf(stderr, ANSI_COLOR_RED "%s\n" ANSI_COLOR_RESET, msg);
+  fprintf(stderr, ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", msg);
+}
+
+// While a line is being edited the terminal is in raw mode with ISIG off, so ^C arrives
+// as an ordinary character and abandons the line. During evaluation the terminal is back
+// in cooked mode and ^C is a signal, which without this would end the session -- the
+// worse outcome of the two, and one that only appeared once the editor started handing
+// the terminal back between reads.
+//
+// The handler does nothing but set the flag. Raising from inside it is not allowed: it
+// would longjmp() out of a signal handler into a stack that is still running. The flag
+// is read by the yield hook instead, which the interpreter calls from its loops.
+static volatile sig_atomic_t interrupted = 0;
+
+static void on_sigint(int signum)
+{
+  (void)signum;
+  interrupted = 1;
+}
+
+static void checkInterrupt(void)
+{
+  if (interrupted) {
+    interrupted = 0;
+    error("Interrupted");
+  }
 }
 
 // Set when the variable exists and is not empty, so that `VAR= ./repl` reads as off
@@ -62,7 +105,9 @@ static Obj *prim_gc(void *root, Obj **env, Obj **list)
 
 int main()
 {
-  lisp_set_printers(printOut, NULL, printErr);
+  lisp_set_printers(printOut, printLog, printErr);
+  lisp_set_cycle_yield(checkInterrupt);
+  signal(SIGINT, on_sigint);
 
   env_constructor[0] = root;
   env_constructor[1] = NULL;
@@ -130,36 +175,53 @@ int main()
   //
   // Lines are accumulated until the parentheses balance, so a form may be as long and as
   // deeply nested as it likes, and typing one across several lines works interactively.
-  char *line = NULL;
-  size_t line_cap = 0;
   char *form = NULL;
   size_t form_len = 0, form_cap = 0;
   int depth = 0;
 
+  const bool interactive = line_edit_interactive();
+  char history_path[512] = "";
+  if (interactive)
+  {
+    const char *home = getenv("HOME");
+    if (home)
+      snprintf(history_path, sizeof(history_path), "%s/.unlisp_history", home);
+    if (history_path[0])
+      line_edit_load_history(history_path);
+    printf("unlisp -- ^D to exit, ^C to abandon a line\n");
+  }
+
   for (;;)
   {
-    const ssize_t n = getline(&line, &line_cap, stdin);
-    if (n < 0)
+    char *line = line_edit_read(depth > 0 ? "...     " : "unlisp> ");
+    if (!line)
       break;
+    if (interactive)
+      line_edit_add_history(line);
 
-    if (form_len + (size_t)n + 1 > form_cap)
+    // The newline the editor stripped has to go back: it separates this line from the
+    // next inside a form, and it terminates a trailing `;` comment.
+    const size_t n = strlen(line);
+    if (form_len + n + 2 > form_cap)
     {
-      form_cap = (form_len + (size_t)n + 1) * 2;
+      form_cap = (form_len + n + 2) * 2;
       char *grown = realloc(form, form_cap);
       if (!grown)
       {
         fprintf(stderr, "out of memory reading input\n");
+        free(line);
         break;
       }
       form = grown;
     }
-    memcpy(form + form_len, line, (size_t)n);
-    form_len += (size_t)n;
+    memcpy(form + form_len, line, n);
+    form_len += n;
+    form[form_len++] = '\n';
     form[form_len] = '\0';
 
     // Track nesting so we know when the form is complete. A semicolon comments out the
     // rest of its line, so parentheses after one do not count.
-    for (ssize_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++)
     {
       const char c = line[i];
       if (c == ';')
@@ -170,9 +232,32 @@ int main()
         depth--;
     }
 
+    // At a terminal, a blank line abandons a form left open by a typo -- otherwise the
+    // prompt simply waits for a closing parenthesis that is never coming. Only when
+    // interactive: a blank line inside a definition is ordinary in a file. ^C arrives
+    // here as an empty line too, which is what makes it abandon the form.
+    if (depth > 0 && interactive)
+    {
+      const char *p = line;
+      while (*p == ' ' || *p == '\t' || *p == '\r')
+        p++;
+      if (*p == '\0')
+      {
+        fprintf(stderr, "abandoned %d unclosed form(s)\n", depth);
+        depth = 0;
+        form_len = 0;
+        form[0] = '\0';
+        free(line);
+        continue;
+      }
+    }
+
+    free(line);
+
     if (depth > 0)
       continue;  // still open, take another line
 
+    interrupted = 0;
     lisp_eval(root, genv, form);
     form_len = 0;
     if (form)
@@ -184,7 +269,9 @@ int main()
   if (form_len > 0)
     lisp_eval(root, genv, form);
 
-  free(line);
+  if (interactive && history_path[0])
+    line_edit_save_history(history_path);
+  line_edit_free();
   free(form);
 
   lisp_destroy();

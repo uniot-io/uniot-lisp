@@ -2,7 +2,7 @@ CFLAGS=-std=gnu99 -g -O2 -Wall -I src
 
 VERSION=$$(git rev-list HEAD --count)
 
-.PHONY: bench clean test test-gc test-mark-sweep test-wasm
+.PHONY: bench clean test test-gc test-mark-sweep test-repl test-wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -18,24 +18,24 @@ env:
 	$(info )
 
 # The REPL is the test harness, so it is built with the heap verifier compiled in.
-repl: repl.c src/libminilisp.c src/libminilisp.h
-	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ repl.c src/libminilisp.c
+repl: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ repl.c line_edit.c src/libminilisp.c
 
 # The same interpreter over the other collector. Everything above the strategy seam is
 # shared, so whatever the suite asks of one has to hold for the other. Both are named
 # explicitly rather than one relying on the default, so that changing the default cannot
 # quietly leave the matrix testing the same collector twice.
-repl-copying: repl.c src/libminilisp.c src/libminilisp.h
-	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_COPYING -o $@ repl.c src/libminilisp.c
+repl-copying: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_COPYING -o $@ repl.c line_edit.c src/libminilisp.c
 
-repl-mark-sweep: repl.c src/libminilisp.c src/libminilisp.h
-	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ repl.c src/libminilisp.c
+repl-mark-sweep: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ repl.c line_edit.c src/libminilisp.c
 
 # The work stack cut to a single entry, so that every collection overflows it and the
 # recovery path runs over and over instead of only being entered once.
-repl-mark-sweep-small: repl.c src/libminilisp.c src/libminilisp.h
+repl-mark-sweep-small: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
 	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP \
-		-D MINILISP_GC_MARK_STACK=1 -o $@ repl.c src/libminilisp.c
+		-D MINILISP_GC_MARK_STACK=1 -o $@ repl.c line_edit.c src/libminilisp.c
 
 # The strategy is fixed when the library is compiled, so comparing two of them takes two
 # binaries. Built without the verifier: it would charge one strategy for work the other
@@ -62,6 +62,11 @@ clean:
 
 test: repl
 	@./test.sh
+
+# Line editing, which the shell suite cannot reach: it pipes its input, and the editor
+# turns itself off when the input is not a terminal.
+test-repl: repl
+	@python3 ./test_repl.py ./repl
 
 test-mark-sweep: repl-mark-sweep
 	@REPL=./repl-mark-sweep ./test.sh
