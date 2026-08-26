@@ -123,15 +123,69 @@ int main()
     fprintf(stderr, "GC diagnostics ignored: rebuild with -D MINILISP_GC_DEBUG=1\n");
 #endif
 
-  char buf[200];
-  char *str = NULL;
-  while (NULL != (str = fgets(buf, sizeof(buf), stdin)))
+  // Read whole expressions rather than whole lines. The old loop took 200 characters at
+  // a time and evaluated each one, so a definition spanning two lines could never parse
+  // and a long line was silently truncated -- which is why the examples in this
+  // repository could not be run by piping them in.
+  //
+  // Lines are accumulated until the parentheses balance, so a form may be as long and as
+  // deeply nested as it likes, and typing one across several lines works interactively.
+  char *line = NULL;
+  size_t line_cap = 0;
+  char *form = NULL;
+  size_t form_len = 0, form_cap = 0;
+  int depth = 0;
+
+  for (;;)
   {
-    str = strchr(str, '\n');
-    if (str != NULL)
-      *str = '\0';
-    lisp_eval(root, genv, buf);
-  };
+    const ssize_t n = getline(&line, &line_cap, stdin);
+    if (n < 0)
+      break;
+
+    if (form_len + (size_t)n + 1 > form_cap)
+    {
+      form_cap = (form_len + (size_t)n + 1) * 2;
+      char *grown = realloc(form, form_cap);
+      if (!grown)
+      {
+        fprintf(stderr, "out of memory reading input\n");
+        break;
+      }
+      form = grown;
+    }
+    memcpy(form + form_len, line, (size_t)n);
+    form_len += (size_t)n;
+    form[form_len] = '\0';
+
+    // Track nesting so we know when the form is complete. A semicolon comments out the
+    // rest of its line, so parentheses after one do not count.
+    for (ssize_t i = 0; i < n; i++)
+    {
+      const char c = line[i];
+      if (c == ';')
+        break;
+      else if (c == '(')
+        depth++;
+      else if (c == ')' && depth > 0)
+        depth--;
+    }
+
+    if (depth > 0)
+      continue;  // still open, take another line
+
+    lisp_eval(root, genv, form);
+    form_len = 0;
+    if (form)
+      form[0] = '\0';
+  }
+
+  // Whatever is left over is unbalanced; evaluating it reports that rather than
+  // discarding it silently.
+  if (form_len > 0)
+    lisp_eval(root, genv, form);
+
+  free(line);
+  free(form);
 
   lisp_destroy();
 

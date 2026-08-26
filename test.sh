@@ -117,38 +117,58 @@ run if b "(if () 'a 'b)"
 run if c "(if () 'a 'b 'c)"
 
 # Logical operations
+# Only () is false, which is the rule `if` uses. 0 is a value like any other.
 run not \#t '(not ())'
 run not '()' '(not #t)'
 run not '()' '(not 3)'
 run not '()' '(not -5)'
-run not \#t '(not 0)'
+run not '()' '(not 0)'
+run not '()' "(not 'a)"
+
+# `and` and `or` return the operand that decided the answer, not a boolean, and they stop
+# as soon as it is decided. (and) is true and (or) is false, as they are everywhere else.
 run and \#t '(and #t #t)'
-run and \#t '(and #t 1)'
-run and \#t '(and #t 1 4)'
+run and 1 '(and #t 1)'
+run and 4 '(and #t 1 4)'
+run and 0 '(and #t 0)'
 run and '()' '(and #t ())'
 run and '()' '(and () #t)'
 run and '()' '(and () ())'
-run and '()' '(and #t 0)'
 run and '()' '(and #t 1 5 ())'
+run and \#t '(and)'
+run and 1 '(and 1)'
+
 run or \#t '(or #t #t)'
 run or \#t '(or #t 1)'
-run or \#t '(or #t 1 4)'
+run or 1 '(or () 1)'
+run or 0 '(or 0 0)'
 run or \#t '(or #t ())'
 run or \#t '(or () #t)'
 run or '()' '(or () ())'
-run or '()' '(or 0 0)'
-run or \#t '(or #t 0)'
-run or \#t '(or #t 1 5 ())'
+run or '()' '(or)'
+run or 1 '(or 1)'
+
+# Stopping early is what makes a guard safe to write. Each of these raises if the second
+# operand is evaluated.
+run and-short-circuits '()' '(and () (/ 1 0))'
+run or-short-circuits \#t '(or #t (/ 1 0))'
+run and-guards-a-list '()' '(and (consp ()) (car ()))'
+
+# The last operand is a tail position, like the last form of a body.
+MINILISP_MAX_EVAL_STACK=4096 run and-tail-position 0 \
+  '(defun lp (n) (and #t (if (eql n 0) 0 (lp (+ n -1))))) (lp 1000)'
+MINILISP_MAX_EVAL_STACK=4096 run or-tail-position 0 \
+  '(defun lp (n) (or () (if (eql n 0) 0 (lp (+ n -1))))) (lp 1000)'
 
 # Numeric comparisons
 run = \#t '(= 3 3)'
 run = '()' '(= 3 2)'
 
 # eq
-run eq \#t "(eq 'foo 'foo)"
-run eq \#t "(eq + +)"
-run eq '()' "(eq 'foo 'bar)"
-run eq '()' "(eq + 'bar)"
+run eq \#t "(eql 'foo 'foo)"
+run eq \#t "(eql + +)"
+run eq '()' "(eql 'foo 'bar)"
+run eq '()' "(eql + 'bar)"
 
 # Other arithmetic operations
 run abs 3 '(abs -3)'
@@ -169,9 +189,9 @@ run div -3 '(/ 6 -2)'
 
 # gensym
 run gensym G__0 '(gensym)'
-run gensym '()' "(eq (gensym) 'G__0)"
-run gensym '()' '(eq (gensym) (gensym))'
-run gensym \#t '((lambda (x) (eq x x)) (gensym))'
+run gensym '()' "(eql (gensym) 'G__0)"
+run gensym '()' '(eql (gensym) (gensym))'
+run gensym \#t '((lambda (x) (eql x x)) (gensym))'
 
 # Functions
 run lambda '<function>' '(lambda (x) x)'
@@ -209,10 +229,13 @@ run macro 42 "
 
 run macro 7 '(defmacro seven () 7) ((lambda () (seven)))'
 
+# macroexpand is a function, so it evaluates its argument: the form to expand is quoted.
+# It used to take the form unevaluated, which made the standard spelling return the quote
+# untouched instead of expanding anything.
 run macroexpand '(if (= x 0) (print x))' "
   (defun lst (x . y) (cons x y))
   (defmacro if-zero (x then) (lst 'if (lst '= x 0) then))
-  (macroexpand (if-zero x (print x)))"
+  (macroexpand '(if-zero x (print x)))"
 
 
 # Sum from 0 to 10
@@ -261,6 +284,42 @@ run gc-churn 55 "
   (while (< i 40) (setq acc ((lambda (x) (list x (+ x 1) (list x))) i)) (setq i (+ i 1)))
   (defun f (x) (if (= x 0) 0 (+ (f (+ x -1)) x)))
   (f 10)"
+
+# `eql` is identity for everything except numbers, which are compared by value. Numbers
+# are boxed and not interned, so every literal is a distinct object and comparing
+# addresses would make this false -- which is what `eq` used to do, and what silently
+# broke generated comparisons against a sensor reading.
+run eql-on-numbers '#t' '(eql 1 1)'
+run eql-distinguishes-numbers '()' '(eql 1 2)'
+run eql-on-symbols '#t' "(eql 'a 'a)"
+run eql-is-identity-for-lists '()' '(eql (list 1) (list 1))'
+
+# Sequencing without allocating. The alternative was (list a b), which conses a cell per
+# statement and throws the result away.
+run progn 3 '(progn 1 2 3)'
+run progn-empty '()' '(progn)'
+run progn-in-a-branch 42 '(if #t (progn 1 42) 0)'
+
+# The last form of a progn is a tail position, like the last form of a body. The budget
+# here is a fraction of what a thousand frames would need.
+MINILISP_MAX_EVAL_STACK=4096 run progn-tail-position 0 \
+  '(defun lp (n) (progn 1 (if (eql n 0) 0 (lp (+ n -1))))) (lp 1000)'
+
+# Type predicates. Without these nothing could ask what it was holding, and `=` raises on
+# anything that is not a number or a boolean.
+run numberp '#t' '(numberp 1)'
+run numberp-negative '()' "(numberp 'a)"
+run symbolp '#t' "(symbolp 'a)"
+run consp '#t' '(consp (list 1))'
+run consp-of-empty '()' '(consp ())'
+run listp-of-empty '#t' '(listp ())'
+run atom-of-empty '#t' '(atom ())'
+run atom-of-cons '()' '(atom (list 1))'
+run functionp '#t' '(functionp +)'
+
+run length 3 '(length (list 1 2 3))'
+run length-of-empty 0 '(length ())'
+run setcdr '(1 . 9)' '(define p (cons 1 2)) (setcdr p 9)'
 
 # A call in tail position must not grow the stack. The budget here is a fraction of what
 # a thousand nested frames would need, so this fails the moment a tail position stops

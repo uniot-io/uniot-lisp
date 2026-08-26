@@ -1,17 +1,25 @@
+;;; This version uses the interpreter's own primitives wherever it has them.
+;;; The definitions they replace are commented out rather than deleted, so the two
+;;; can be compared: examples/life-portable.lisp keeps every one of them and only
+;;; renames them out of the way. Both should print-board the same thing.
 ;;;
 ;;; Conway's game of life
 ;;;
 
 ;; (progn expr ...)
 ;; => ((lambda () expr ...))
-(defmacro progn (expr . rest)
-  (list (cons 'lambda (cons () (cons expr rest)))))
+;; Superseded by the interpreter's own `progn`, which is a special form: it sequences
+;; without building a lambda and an environment frame per use, and its last expression is
+;; a tail position. Kept here because it shows how the macro is written when the host
+;; does not provide one.
+;; (defmacro progn (expr . rest)
+;;   (list (cons 'lambda (cons () (cons expr rest)))))
 
-(defun list (x . y)
-  (cons x y))
+;; (defun list (x . y)
+;;   (cons x y))
 
-(defun not (x)
-  (if x () t))
+;; (defun not (x)
+;;   (if x () t))
 
 ;; (let var val body ...)
 ;; => ((lambda (var) body ...) val)
@@ -23,10 +31,10 @@
 ;; => (if e1 (and e2 ...))
 ;; (and e1)
 ;; => e1
-(defmacro and (expr . rest)
-  (if rest
-      (list 'if expr (cons 'and rest))
-    expr))
+;; (defmacro and (expr . rest)
+;;   (if rest
+;;       (list 'if expr (cons 'and rest))
+;;     expr))
 
 ;; (or e1 e2 ...)
 ;; => (let <tmp> e1
@@ -36,12 +44,12 @@
 ;;
 ;; The reason to use the temporary variables is to avoid evaluating the
 ;; arguments more than once.
-(defmacro or (expr . rest)
-  (if rest
-      (let var (gensym)
-           (list 'let var expr
-                 (list 'if var var (cons 'or rest))))
-    expr))
+;; (defmacro or (expr . rest)
+;;   (if rest
+;;       (let var (gensym)
+;;            (list 'let var expr
+;;                  (list 'if var var (cons 'or rest))))
+;;     expr))
 
 ;; (when expr body ...)
 ;; => (if expr (progn body ...))
@@ -57,9 +65,9 @@
 ;;; Numeric operators
 ;;;
 
-(defun <= (e1 e2)
-  (or (< e1 e2)
-      (= e1 e2)))
+;; (defun <= (e1 e2)
+;;   (or (< e1 e2)
+;;       (= e1 e2)))
 
 ;;;
 ;;; List operators
@@ -109,14 +117,14 @@
        (< x height)
        (<= 0 y)
        (< y width)
-       (eq (get board x y) '@)))
+       (eql (get board x y) '@)))
 
 ;; Print out the given board.
-(defun print (board)
+(defun print-board (board)
   (if (not board)
       '$
-    (println (car board))
-    (print (cdr board))))
+    (print (car board))
+    (print-board (cdr board))))
 
 (defun count (board x y)
   (let at (lambda (x y)
@@ -136,10 +144,17 @@
            (or (= c 2) (= c 3))
          (= c 3))))
 
+(defun generations () 4)
+
 (defun run (board)
-  (while t
-    (print board)
-    (println '*)
+  ;; Upstream looped forever -- it was a screen demo you interrupted by hand.
+  ;; Bounded here so the example terminates and can be compared against
+  ;; examples/life-portable.lisp.
+  (define gen 0)
+  (while (< gen (generations))
+    (setq gen (+ gen 1))
+    (print-board board)
+    (print '*)
     (let newboard (map (iota height)
                        (lambda (y)
                          (map (iota width)

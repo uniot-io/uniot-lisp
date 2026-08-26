@@ -1,3 +1,7 @@
+;;; This version uses the interpreter's own primitives wherever it has them.
+;;; The definitions they replace are commented out rather than deleted, so the two
+;;; can be compared: examples/nqueens-portable.lisp keeps every one of them and only
+;;; renames them out of the way. Both should print-board the same thing.
 ;;;
 ;;; N-queens puzzle solver.
 ;;;
@@ -17,14 +21,18 @@
 
 ;; (progn expr ...)
 ;; => ((lambda () expr ...))
-(defmacro progn (expr . rest)
-  (list (cons 'lambda (cons () (cons expr rest)))))
+;; Superseded by the interpreter's own `progn`, which is a special form: it sequences
+;; without building a lambda and an environment frame per use, and its last expression is
+;; a tail position. Kept here because it shows how the macro is written when the host
+;; does not provide one.
+;; (defmacro progn (expr . rest)
+;;   (list (cons 'lambda (cons () (cons expr rest)))))
 
-(defun list (x . y)
-  (cons x y))
+;; (defun list (x . y)
+;;   (cons x y))
 
-(defun not (x)
-  (if x () t))
+;; (defun not (x)
+;;   (if x () t))
 
 ;; (let1 var val body ...)
 ;; => ((lambda (var) body ...) val)
@@ -36,10 +44,10 @@
 ;; => (if e1 (and e2 ...))
 ;; (and e1)
 ;; => e1
-(defmacro and (expr . rest)
-  (if rest
-      (list 'if expr (cons 'and rest))
-    expr))
+;; (defmacro and (expr . rest)
+;;   (if rest
+;;       (list 'if expr (cons 'and rest))
+;;     expr))
 
 ;; (or e1 e2 ...)
 ;; => (let1 <tmp> e1
@@ -49,12 +57,12 @@
 ;;
 ;; The reason to use the temporary variables is to avoid evaluating the
 ;; arguments more than once.
-(defmacro or (expr . rest)
-  (if rest
-      (let1 var (gensym)
-	    (list 'let1 var expr
-		  (list 'if var var (cons 'or rest))))
-    expr))
+;; (defmacro or (expr . rest)
+;;   (if rest
+;;       (let1 var (gensym)
+;; 	    (list 'let1 var expr
+;; 		  (list 'if var var (cons 'or rest))))
+;;     expr))
 
 ;; (when expr body ...)
 ;; => (if expr (progn body ...))
@@ -70,9 +78,9 @@
 ;;; Numeric operators
 ;;;
 
-(defun <= (e1 e2)
-  (or (< e1 e2)
-      (= e1 e2)))
+;; (defun <= (e1 e2)
+;;   (or (< e1 e2)
+;;       (= e1 e2)))
 
 ;;;
 ;;; List operators
@@ -148,14 +156,14 @@
 
 ;; Returns true if location (x, y)'s value is "@".
 (defun set? (board x y)
-  (eq (get board x y) '@))
+  (eql (get board x y) '@))
 
 ;; Print out the given board.
-(defun print (board)
+(defun print-board (board)
   (if (not board)
       '$
-    (println (car board))
-    (print (cdr board))))
+    (print (car board))
+    (print-board (cdr board))))
 
 ;; Returns true if we cannot place a queen at position (x, y), assuming that
 ;; queens have already been placed on each row from 0 to x-1.
@@ -179,8 +187,8 @@
 (defun %solve (board x)
   (if (= x board-size)
       ;; Problem solved
-      (progn (print board)
-	     (println '$))
+      (progn (print-board board)
+	     (print '$))
     (for-each (iota board-size)
 	      (lambda (y)
 		(unless (conflict? board x y)
@@ -189,9 +197,9 @@
 		  (clear board x y))))))
 
 (defun solve (board)
-  (println 'start)
+  (print 'start)
   (%solve board 0)
-  (println 'done))
+  (print 'done))
 
 ;;;
 ;;; Main

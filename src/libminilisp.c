@@ -1680,9 +1680,39 @@ static Obj *if_branch(void *root, Obj **env, Obj **list) {
     return eval_but_last(root, env, els);
 }
 
-// Registered as `if`. eval() recognises this function and takes the branch over itself so
-// that it lands in tail position; see the comment there.
+// Evaluates a single argument. Defined below, next to the predicates that share it.
+static Obj *eval_one(void *root, Obj **env, Obj **list, const char *name);
+
+// Registered as `if`, `progn`, `and` and `or`. eval() recognises these and takes their
+// tail form over itself so that it lands in tail position; see the comment there.
 static Obj *prim_if(void *root, Obj **env, Obj **list);
+static Obj *prim_progn(void *root, Obj **env, Obj **list);
+static Obj *prim_and(void *root, Obj **env, Obj **list);
+static Obj *prim_or(void *root, Obj **env, Obj **list);
+
+// Evaluates the operands of `and` or `or` until the answer is decided. Returns the
+// operand left over for the caller to evaluate in tail position, or NULL when the answer
+// was settled early, in which case it is left in *settled.
+//
+// Stopping early is the whole point: (and (consp x) (car x)) has to be safe to write, and
+// it is not if both operands are evaluated. Only () is false here, as it is for `if`.
+static Obj *logic_tail(void *root, Obj **env, Obj **args, bool is_and, Obj **settled) {
+    if (*args == Nil) {
+        *settled = is_and ? True : Nil;
+        return NULL;
+    }
+    DEFINE1(operand);
+    while ((*args)->cdr != Nil) {
+        *operand = (*args)->car;
+        *operand = eval(root, env, operand);
+        if (is_and ? (*operand == Nil) : (*operand != Nil)) {
+            *settled = *operand;
+            return NULL;
+        }
+        *args = (*args)->cdr;
+    }
+    return (*args)->car;
+}
 
 // Evaluates the S expression.
 //
@@ -1813,6 +1843,20 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
                     *cur = if_branch(root, cenv, args);
                     break;
                 }
+                if ((*fn)->fn == prim_progn) {
+                    if (*args == Nil)
+                        return Nil;
+                    *cur = eval_but_last(root, cenv, args);
+                    break;
+                }
+                if ((*fn)->fn == prim_and || (*fn)->fn == prim_or) {
+                    Obj *settled = NULL;
+                    Obj *tail = logic_tail(root, cenv, args, (*fn)->fn == prim_and, &settled);
+                    if (!tail)
+                        return settled;
+                    *cur = tail;
+                    break;
+                }
                 return (*fn)->fn(root, cenv, args);
             }
 
@@ -1871,17 +1915,29 @@ static Obj *prim_cons(void *root, Obj **env, Obj **list) {
 // (car <cell>)
 static Obj *prim_car(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
-    if (length(args) < 1 || args->car->type != TCELL || args->cdr != Nil)
+    if (length(args) != 1)
         error("Malformed car");
-    return args->car->car;
+    Obj *x = args->car;
+    // (car ()) is () rather than an error, which is what walking a list relies on.
+    if (x == Nil)
+        return Nil;
+    if (x->type != TCELL)
+        error("car takes a list");
+    return x->car;
 }
 
 // (cdr <cell>)
 static Obj *prim_cdr(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
-    if (length(args) < 1 || args->car->type != TCELL || args->cdr != Nil)
+    if (length(args) != 1)
         error("Malformed cdr");
-    return args->car->cdr;
+    Obj *x = args->car;
+    // (cdr ()) is () rather than an error, which is what walking a list relies on.
+    if (x == Nil)
+        return Nil;
+    if (x->type != TCELL)
+        error("cdr takes a list");
+    return x->cdr;
 }
 
 // (setq <symbol> expr)
@@ -1907,6 +1963,15 @@ static Obj *prim_setcar(void *root, Obj **env, Obj **list) {
     if (length(*args) != 2 || (*args)->car->type != TCELL)
         error("Malformed setcar");
     (*args)->car->car = (*args)->cdr->car;
+    return (*args)->car;
+}
+
+static Obj *prim_setcdr(void *root, Obj **env, Obj **list) {
+    DEFINE1(args);
+    *args = eval_list(root, env, list);
+    if (length(*args) != 2 || (*args)->car->type != TCELL)
+        error("Malformed setcdr");
+    (*args)->car->cdr = (*args)->cdr->car;
     return (*args)->car;
 }
 
@@ -1960,6 +2025,11 @@ static Obj *prim_plus(void *root, Obj **env, Obj **list) {
 // (- <integer> ...)
 static Obj *prim_minus(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
+    // Without this, args is Nil, whose union is zero filled, so args->cdr reads NULL
+    // rather than Nil, the single-argument branch is skipped and args->car is
+    // dereferenced through a null pointer.
+    if (args == Nil)
+        error("Malformed -");
     for (Obj *p = args; p != Nil; p = p->cdr)
         if (p->car->type != TINT)
             error("- takes only numbers");
@@ -1991,12 +2061,16 @@ static Obj *prim_modulo(void *root, Obj **env, Obj **list) {
 static Obj *prim_div(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
 
-    if (length(args) < 2)
+    if (args == Nil)
         error("Malformed /");
 
     for (Obj *p = args; p != Nil; p = p->cdr)
         if (p->car->type != TINT)
             error("/ takes only numbers");
+
+    // (/ x) is x. A reciprocal would be meaningless with integers only.
+    if (args->cdr == Nil)
+        return args->car;
 
     for (Obj *p = args->cdr; p != Nil; p = p->cdr)
         if (p->car->value == 0)
@@ -2025,12 +2099,16 @@ static bool mul_with_overflow_check(int a, int b, int* res) {
 static Obj *prim_mul(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
 
-    if (length(args) < 2)
-        error("Malformed *");
+    // The identity element, as everywhere else in this family. `+` already did this.
+    if (args == Nil)
+        return make_int(root, 1);
 
     for (Obj *p = args; p != Nil; p = p->cdr)
         if (p->car->type != TINT)
             error("* takes only numbers");
+
+    if (args->cdr == Nil)
+        return args->car;
 
     if (args->car->value == 0)
         return make_int(root, 0);
@@ -2049,57 +2127,69 @@ static Obj *prim_mul(void *root, Obj **env, Obj **list) {
 // (< <integer> <integer>)
 static Obj *prim_lt(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
-    if (length(args) != 2)
+    if (length(args) < 2)
         error("Malformed <");
 
-    Obj *x = args->car;
-    Obj *y = args->cdr->car;
-    if (x->type != TINT || y->type != TINT)
-        error("< takes only numbers");
+    for (Obj *p = args; p != Nil; p = p->cdr)
+        if (p->car->type != TINT)
+            error("< takes only numbers");
 
-    return x->value < y->value ? True : Nil;
+    // Chained: (< 1 2 3) asks whether every adjacent pair holds.
+    for (Obj *p = args; p->cdr != Nil; p = p->cdr)
+        if (!(p->car->value < p->cdr->car->value))
+            return Nil;
+    return True;
 }
 
 // (<= <integer> <integer>)
 static Obj *prim_lte(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
-    if (length(args) != 2)
+    if (length(args) < 2)
         error("Malformed <=");
 
-    Obj *x = args->car;
-    Obj *y = args->cdr->car;
-    if (x->type != TINT || y->type != TINT)
-        error("<= takes only numbers");
+    for (Obj *p = args; p != Nil; p = p->cdr)
+        if (p->car->type != TINT)
+            error("<= takes only numbers");
 
-    return x->value <= y->value ? True : Nil;
+    // Chained: (<= 1 2 3) asks whether every adjacent pair holds.
+    for (Obj *p = args; p->cdr != Nil; p = p->cdr)
+        if (!(p->car->value <= p->cdr->car->value))
+            return Nil;
+    return True;
 }
 
 // (> <integer> <integer>)
 static Obj *prim_gt(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
-    if (length(args) != 2)
+    if (length(args) < 2)
         error("Malformed >");
 
-    Obj *x = args->car;
-    Obj *y = args->cdr->car;
-    if (x->type != TINT || y->type != TINT)
-        error("> takes only numbers");
+    for (Obj *p = args; p != Nil; p = p->cdr)
+        if (p->car->type != TINT)
+            error("> takes only numbers");
 
-    return x->value > y->value ? True : Nil;
+    // Chained: (> 1 2 3) asks whether every adjacent pair holds.
+    for (Obj *p = args; p->cdr != Nil; p = p->cdr)
+        if (!(p->car->value > p->cdr->car->value))
+            return Nil;
+    return True;
 }
 
 // (>= <integer> <integer>)
 static Obj *prim_gte(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
-    if (length(args) != 2)
+    if (length(args) < 2)
         error("Malformed >=");
 
-    Obj *x = args->car;
-    Obj *y = args->cdr->car;
-    if (x->type != TINT || y->type != TINT)
-        error(">= takes only numbers");
+    for (Obj *p = args; p != Nil; p = p->cdr)
+        if (p->car->type != TINT)
+            error(">= takes only numbers");
 
-    return x->value >= y->value ? True : Nil;
+    // Chained: (>= 1 2 3) asks whether every adjacent pair holds.
+    for (Obj *p = args; p->cdr != Nil; p = p->cdr)
+        if (!(p->car->value >= p->cdr->car->value))
+            return Nil;
+    return True;
 }
 
 static Obj *handle_function(void *root, Obj **env, Obj **list, int type) {
@@ -2123,8 +2213,10 @@ static Obj *prim_lambda(void *root, Obj **env, Obj **list) {
 }
 
 static Obj *handle_defun(void *root, Obj **env, Obj **list, int type) {
-    if ((*list)->car->type != TSYMBOL || (*list)->cdr->type != TCELL)
-        error("Malformed defun");
+    // (*list) is Nil when there are no arguments at all, and reading its car walks off a
+    // literal whose union is zero filled.
+    if ((*list)->type != TCELL || (*list)->car->type != TSYMBOL || (*list)->cdr->type != TCELL)
+        error("Malformed %s", type == TMACRO ? "defmacro" : "defun");
     DEFINE4(fn, sym, rest, bind);
     *sym = (*list)->car;
     *rest = (*list)->cdr;
@@ -2166,7 +2258,10 @@ static Obj *prim_macroexpand(void *root, Obj **env, Obj **list) {
     if (length(*list) != 1)
         error("Malformed macroexpand");
     DEFINE1(body);
-    *body = (*list)->car;
+    // Evaluated, because macroexpand is a function rather than a special form: the
+    // standard spelling is (macroexpand '(m 5)). Taking the form unevaluated made that
+    // spelling return the quote form untouched.
+    *body = eval_list(root, env, list)->car;
     return macroexpand(root, env, body);
 }
 
@@ -2200,6 +2295,20 @@ static Obj *prim_list(void *root, Obj **env, Obj **list) {
 }
 
 // (if expr expr expr ...)
+// Sequencing. Blockly had been wrapping multi-statement branches in (list ...) for want
+// of this, which allocated a cons per statement and threw the list away.
+//
+// eval() intercepts this too, so the last form lands in tail position; this body only
+// runs if `progn` is applied by some other path.
+static Obj *prim_progn(void *root, Obj **env, Obj **list) {
+    if (*list == Nil)
+        return Nil;
+    DEFINE1(body);
+    *body = *list;
+    *body = eval_but_last(root, env, body);
+    return eval(root, env, body);
+}
+
 // eval() intercepts this and evaluates the branch in its own loop, so this body only
 // runs if `if` is ever applied by some other path. It gives the same answer, without the
 // tail benefit.
@@ -2210,20 +2319,11 @@ static Obj *prim_if(void *root, Obj **env, Obj **list) {
 }
 
 // (not expr)
+// Only () is false, which is the rule `if` uses. It previously also treated 0 as false,
+// so (if x ...) and (if (not (not x)) ...) disagreed when x was 0. Comparing a flag is
+// what `=` is for: (= x #t) is unchanged.
 static Obj *prim_not(void *root, Obj **env, Obj **list) {
-    if (length(*list) != 1)
-        error("Malformed not");
-
-    Obj *arg = eval_list(root, env, list)->car;
-    if (arg->type == TTRUE)
-        return Nil;
-    if (arg->type == TNIL)
-        return True;
-    if (arg->type != TINT)
-        error("not takes only boolean and int values");
-
-    const bool val = (bool)arg->value;
-    return val ? Nil : True;
+    return eval_one(root, env, list, "not") == Nil ? True : Nil;
 }
 
 // (abs <integer>)
@@ -2240,74 +2340,125 @@ static Obj *prim_abs(void *root, Obj **env, Obj **list) {
 }
 
 // (and expr expr ..)
+// eval() intercepts these two so that the last operand lands in tail position; these
+// bodies only run if they are applied by some other path.
+//
+// Both return the operand that decided the answer, not a boolean: (and 1 2) is 2 and
+// (or () 5) is 5, as in Emacs Lisp and Common Lisp. (and) is true and (or) is false.
 static Obj *prim_and(void *root, Obj **env, Obj **list) {
-    if (length(*list) < 2)
-        error("Malformed and");
-
-    for (Obj *args = eval_list(root, env, list); args != Nil; args = args->cdr) {
-        if (args->car->type == TNIL)
-            return Nil;
-        if (args->car->type == TTRUE)
-            continue;
-        if (args->car->type != TINT)
-            error("and takes only boolean and int values");
-        if (! (bool)args->car->value)
-            return Nil;
-    }
-
-    return True;
+    DEFINE1(args);
+    *args = *list;
+    Obj *settled = NULL;
+    Obj *tail = logic_tail(root, env, args, true, &settled);
+    if (!tail)
+        return settled;
+    *args = tail;
+    return eval(root, env, args);
 }
 
-// (or expr expr ..)
 static Obj *prim_or(void *root, Obj **env, Obj **list) {
-    if (length(*list) < 2)
-        error("Malformed or");
-
-    bool current_res = false;
-    for (Obj *args = eval_list(root, env, list); args != Nil; args = args->cdr) {
-        if (args->car->type == TNIL)
-            current_res = current_res || false;
-        else if (args->car->type == TTRUE)
-            current_res = current_res || true;
-        else if (args->car->type != TINT)
-            error("or takes only boolean and int values");
-
-        current_res = current_res || (bool)args->car->value;
-    }
-
-    return current_res ? True : Nil;
+    DEFINE1(args);
+    *args = *list;
+    Obj *settled = NULL;
+    Obj *tail = logic_tail(root, env, args, false, &settled);
+    if (!tail)
+        return settled;
+    *args = tail;
+    return eval(root, env, args);
 }
 
 // (= <integer|boolean> <integer|boolean>)
-static Obj *prim_num_eq(void *root, Obj **env, Obj **list) {
-    if (length(*list) != 2)
-        error("Malformed =");
-    Obj *values = eval_list(root, env, list);
-    Obj *x = values->car;
-    Obj *y = values->cdr->car;
+// One pair, with the deliberate coercion between numbers and booleans that lets a flag
+// be compared against #t. It is not transitive -- 5 = #t and 1 = #t, but 5 is not 1 --
+// which is why `eql` exists alongside it as the real equality.
+static bool num_eq_pair(Obj *x, Obj *y) {
     if ((x->type != TINT && x->type != TTRUE && x->type != TNIL) ||
         (y->type != TINT && y->type != TTRUE && y->type != TNIL))
         error("= takes only numbers and booleans");
 
     if (x->type == TINT && y->type == TINT)
-        return x->value == y->value ? True : Nil;
+        return x->value == y->value;
 
-    int x_bool_val = x->type == TINT ? (x->value == 0 ? 0 : 1) : x->type == TTRUE ? 1 : 0;
-    int y_bool_val = y->type == TINT ? (y->value == 0 ? 0 : 1) : y->type == TTRUE ? 1 : 0;
+    const int xb = x->type == TINT ? (x->value != 0) : (x->type == TTRUE);
+    const int yb = y->type == TINT ? (y->value != 0) : (y->type == TTRUE);
+    return xb == yb;
+}
 
-    // TODO: implement list matching?
+static Obj *prim_num_eq(void *root, Obj **env, Obj **list) {
+    Obj *args = eval_list(root, env, list);
+    if (length(args) < 2)
+        error("Malformed =");
 
-    return x_bool_val == y_bool_val ? True : Nil;
+    // Chained, like the ordering comparisons.
+    for (Obj *p = args; p->cdr != Nil; p = p->cdr)
+        if (!num_eq_pair(p->car, p->cdr->car))
+            return Nil;
+    return True;
 }
 
 // TODO: implement null? function for checking if the object is Nil
 
 // (eq expr expr)
-static Obj *prim_eq(void *root, Obj **env, Obj **list) {
+// Named `eql` rather than `eq` because that is what it does. In this family of Lisps
+// `eq` is identity, and identity of numbers is meaningless when they are boxed and not
+// interned -- every literal is a distinct object, so (eq 1 1) is false. `eql` is identity
+// for everything else and value for numbers, which is what a caller almost always wants
+// and what Emacs Lisp and Common Lisp both mean by the name.
+static Obj *prim_eql(void *root, Obj **env, Obj **list) {
     if (length(*list) != 2)
-        error("Malformed eq");
+        error("Malformed eql");
     Obj *values = eval_list(root, env, list);
-    return values->car == values->cdr->car ? True : Nil;
+    Obj *x = values->car;
+    Obj *y = values->cdr->car;
+    if (x->type == TINT && y->type == TINT)
+        return x->value == y->value ? True : Nil;
+    return x == y ? True : Nil;
+}
+
+// Evaluates a single argument. The predicates below all want exactly this, and none of
+// them allocates afterwards, so the bare pointer is safe to hand back.
+static Obj *eval_one(void *root, Obj **env, Obj **list, const char *name) {
+    if (length(*list) != 1)
+        error("Malformed %s", name);
+    return eval_list(root, env, list)->car;
+}
+
+// Type predicates. Without these a script cannot ask what it is holding, which matters
+// because `=` raises on anything that is not a number or a boolean and there was no way
+// to check first.
+static Obj *prim_numberp(void *root, Obj **env, Obj **list) {
+    return eval_one(root, env, list, "numberp")->type == TINT ? True : Nil;
+}
+
+static Obj *prim_symbolp(void *root, Obj **env, Obj **list) {
+    return eval_one(root, env, list, "symbolp")->type == TSYMBOL ? True : Nil;
+}
+
+static Obj *prim_consp(void *root, Obj **env, Obj **list) {
+    return eval_one(root, env, list, "consp")->type == TCELL ? True : Nil;
+}
+
+// A list is a cons or the empty list, and everything that is not a cons is an atom --
+// which makes () both, as it is everywhere else in this family.
+static Obj *prim_listp(void *root, Obj **env, Obj **list) {
+    Obj *x = eval_one(root, env, list, "listp");
+    return (x->type == TCELL || x == Nil) ? True : Nil;
+}
+
+static Obj *prim_atom(void *root, Obj **env, Obj **list) {
+    return eval_one(root, env, list, "atom")->type != TCELL ? True : Nil;
+}
+
+static Obj *prim_functionp(void *root, Obj **env, Obj **list) {
+    const int t = eval_one(root, env, list, "functionp")->type;
+    return (t == TFUNCTION || t == TPRIMITIVE) ? True : Nil;
+}
+
+static Obj *prim_length(void *root, Obj **env, Obj **list) {
+    const int len = length(eval_one(root, env, list, "length"));
+    if (len < 0)
+        error("length takes a list");
+    return make_int(root, len);
 }
 
 void add_primitive(void *root, Obj **env, const char *name, Primitive *fn) {
@@ -2371,7 +2522,16 @@ void define_primitives(void *root, Obj **env) {
     add_primitive(root, env, "lambda", prim_lambda);
     add_primitive(root, env, "if", prim_if);
     add_primitive(root, env, "=", prim_num_eq);
-    add_primitive(root, env, "eq", prim_eq);
+    add_primitive(root, env, "eql", prim_eql);
+    add_primitive(root, env, "progn", prim_progn);
+    add_primitive(root, env, "setcdr", prim_setcdr);
+    add_primitive(root, env, "length", prim_length);
+    add_primitive(root, env, "numberp", prim_numberp);
+    add_primitive(root, env, "symbolp", prim_symbolp);
+    add_primitive(root, env, "consp", prim_consp);
+    add_primitive(root, env, "listp", prim_listp);
+    add_primitive(root, env, "atom", prim_atom);
+    add_primitive(root, env, "functionp", prim_functionp);
     add_primitive(root, env, "abs", prim_abs);
     add_primitive(root, env, "print", prim_print);
     // Implemented to reduce code.
