@@ -692,6 +692,19 @@ static void gc_verify(void *root) {
 // The costs sit on the other side. Allocation searches for a block that fits instead of
 // bumping a pointer, a collection touches dead objects as well as live ones, and the free
 // space ends up in pieces rather than in one run.
+//
+// That last one is what invites a compacting collector, and it was measured rather than
+// assumed. Soak runs totalling some nineteen thousand collections, on a host and on an
+// ESP8266, settle within a few hundred collections and then never drift: sweep rebuilds
+// the free list from scratch every time, merging neighbours, so the heap keeps no memory
+// of its own history and its shape follows where the live data is. The worst largest
+// free block seen on target was 692 bytes, against a largest possible object of 72 -- a
+// symbol at SYMBOL_MAX_LEN.
+//
+// Worth revisiting if a variable-length type with large values ever arrives, real strings
+// or a much larger SYMBOL_MAX_LEN, because that margin is what makes this safe. A device
+// reporting "Memory exhausted" with a large free total and a small largest block is the
+// same thing said out loud.
 
 // The heap, and the length actually used. MEMORY_SIZE is rounded down to a whole number
 // of words: every block size is a multiple of the word size, so a ragged tail could never
