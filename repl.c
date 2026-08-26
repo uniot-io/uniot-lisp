@@ -138,9 +138,6 @@ int main()
   add_primitive(root, genv, "mem", prim_mem);
   add_primitive(root, genv, "gc", prim_gc);
 
-  Obj *VERSION = make_int(root, 10204); // Represents the version 1.2.3
-  add_constant(root, genv, "#version", &VERSION);
-
   // lisp_eval(root, genv, "(define a 5) (setq a 1) (print #itr) (print #t) (setq #itr 1)");
   // lisp_eval(root, genv, "(print #itr) (while (< #itr 10) (print #itr)) (print #itr)");
   // lisp_eval(root, genv, "(define code '(+ 1 2)) (eval '(+ 2 2)) (eval code) (print code) (+ 5 6)");
@@ -155,8 +152,7 @@ int main()
   // ((lambda (l x) (while (< #itr x) (setq l (cdr l)) (print l))) (list 1 2 3 4 5) 3)
 
   // Enabled only once setup is complete: an allocation failure during setup would
-  // unwind through error() before any setjmp() has been established, and setup itself
-  // is not GC-safe (see `VERSION` below, an unrooted Obj* passed to add_constant).
+  // unwind through error() before any setjmp() has been established.
   always_gc = env_flag("MINILISP_ALWAYS_GC");
 #if MINILISP_GC_DEBUG
   debug_gc = env_flag("MINILISP_DEBUG_GC");

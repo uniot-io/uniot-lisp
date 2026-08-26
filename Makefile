@@ -1,8 +1,6 @@
 CFLAGS=-std=gnu99 -g -O2 -Wall -I src
 
-VERSION=$$(git rev-list HEAD --count)
-
-.PHONY: bench clean test test-gc test-mark-sweep test-repl test-wasm
+.PHONY: bench clean test test-32 test-gc test-mark-sweep test-repl test-wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -58,6 +56,9 @@ clean:
 	rm -f repl-copying
 	rm -f repl-mark-sweep
 	rm -f repl-mark-sweep-small
+	rm -f repl32
+	rm -f repl32-copying
+	rm -f repl32-mark-sweep
 	rm -f build/*
 
 test: repl
@@ -67,6 +68,46 @@ test: repl
 # turns itself off when the input is not a terminal.
 test-repl: repl
 	@python3 ./test_repl.py ./repl
+
+# A 32-bit host build, which is the only way this suite can run against the object layout
+# the devices actually use. A pointer is four bytes there, so the header is four and not
+# eight, an integer is 8 bytes and not 12, a cell is 12 and not 24 -- the same numbers as
+# an ESP8266 and as wasm32. On a 64-bit host every object is twice the size, so a heap of
+# the size a device really has cannot hold what the tests ask of it, and the configuration
+# that ships was untestable here.
+#
+# Needs a 32-bit libc: apt install gcc-multilib libc6-dev-i386. Skipped rather than failed
+# where it is absent, since nothing else in this repository wants it.
+HAVE_M32 := $(shell printf 'int main(void){return 0;}' > /tmp/.m32probe.c 2>/dev/null && \
+	$(CC) -m32 /tmp/.m32probe.c -o /tmp/.m32probe >/dev/null 2>&1 && echo yes)
+
+repl32: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ repl.c line_edit.c src/libminilisp.c
+
+repl32-copying: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_COPYING -o $@ repl.c line_edit.c src/libminilisp.c
+
+repl32-mark-sweep: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ repl.c line_edit.c src/libminilisp.c
+
+# The heap the firmware runs with. This is the point of the 32-bit build: at 64 bits the
+# same suite runs out of memory here, and does so for a reason that does not exist on the
+# hardware.
+DEVICE_HEAP ?= 7000
+
+test-32:
+ifeq ($(HAVE_M32),yes)
+	@$(MAKE) --no-print-directory repl32 repl32-copying repl32-mark-sweep
+	@echo "--- 32-bit, copying ---"                && REPL=./repl32-copying ./test.sh
+	@echo "--- 32-bit, copying, verified ---"      && MINILISP_VERIFY_GC=1 REPL=./repl32-copying ./test.sh
+	@echo "--- 32-bit, mark-sweep ---"             && REPL=./repl32-mark-sweep ./test.sh
+	@echo "--- 32-bit, mark-sweep, verified ---"   && MINILISP_VERIFY_GC=1 REPL=./repl32-mark-sweep ./test.sh
+	@echo "--- 32-bit, mark-sweep, $(DEVICE_HEAP) byte heap ---" && \
+		MINILISP_HEAP_SIZE=$(DEVICE_HEAP) REPL=./repl32-mark-sweep ./test.sh
+	@python3 ./test_repl.py ./repl32
+else
+	@echo "skipped: no 32-bit libc (apt install gcc-multilib libc6-dev-i386)"
+endif
 
 test-mark-sweep: repl-mark-sweep
 	@REPL=./repl-mark-sweep ./test.sh
@@ -97,7 +138,6 @@ server:
 wasm:
 	mkdir -p build
 	emcc -O3 \
-		-D LIB_VERSION=$(VERSION) \
 		-I src \
 		-s WASM=1 \
 		-s EXPORTED_FUNCTIONS='["_malloc", "_free"]' \
