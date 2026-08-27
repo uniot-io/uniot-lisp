@@ -417,6 +417,48 @@ run_slow heavy-recursion 10946 \
 run_slow long-tail-loop 40504500 \
   '(defun sum (n acc) (if (= n 0) acc (sum (+ n -1) (+ acc n)))) (sum 9000 0)'
 
+# A parameter list may be a bare symbol, which takes every argument. Without it a
+# function needs at least one required parameter before the rest, so "any number of
+# arguments, none required" could not be written at all.
+run params-symbol 3 '(defun f args (length args)) (f 1 2 3)'
+run params-symbol-empty "()" '(defun f args args) (f)'
+run params-symbol-lambda "(1 2)" '((lambda args args) 1 2)'
+run params-dotted "(2 3)" '(defun f (a . rest) rest) (f 1 2 3)'
+run params-dotted-empty "()" '(defun f (a . rest) rest) (f 1)'
+
+# Calling with the wrong number of arguments is noticed either way round. Too many used
+# to be discarded in silence while too few raised, which meant the same mistake was
+# caught or not depending on which direction it went in.
+run_error "too few arguments" "too few arguments" '(defun f (a b) a) (f 1)'
+run_error "too many arguments" "too many arguments" '(defun f (a) a) (f 1 2)'
+run_error "too many arguments, none expected" "too many arguments" '(defun f () 9) (f 1)'
+run_error "too many arguments to a macro" "too many arguments" '(defmacro m (a) a) (m 1 2)'
+
+# A dot with nothing before it has no cell to give a tail to. It used to write through
+# Nil -- a shared constant, not a cell -- and read as ().
+run_error "stray dot in a list" "Stray dot" "(quote (. rest))"
+run params-dotted-pair "(a . b)" "(quote (a . b))"
+
+# Parameter names must be distinct. The second binding used to hide the first in
+# silence, which is predictable only if you know a later parameter is consed on later
+# and so is found first.
+run_error "duplicate parameter" "Duplicate parameter: a" '(defun f (a a) a)'
+run_error "duplicate parameter, apart" "Duplicate parameter: a" '(defun f (a b a) a)'
+run_error "duplicate rest parameter" "Duplicate parameter: a" '(defun f (a . a) a)'
+run_error "duplicate parameter in a macro" "Duplicate parameter: x" '(defmacro m (x x) x)'
+run distinct-parameters 3 '(defun f (a b) (+ a b)) (f 1 2)'
+
+# A macro object in head position, which a form built at run time can produce. It used
+# to report an internal bug rather than the ordinary complaint.
+run_error "macro object as a head" "head of a list must be a function" \
+  '(defmacro m (a) a) (eval (cons m (list 1)))'
+run macro-is-a-value "#t" '(defmacro m (a) a) (eql m m)'
+
+# A parameter that is not a symbol, in either position.
+run_error "non-symbol parameter" "must be a symbol" '(lambda (a 5) 1)'
+run_error "non-symbol rest parameter" "must be a symbol" '(lambda (a . 5) 1)'
+run_error "non-list parameters" "Malformed lambda" '(lambda 5 1)'
+
 # Redefinition rebinds rather than raising, as it does everywhere else in this family.
 run redefine-value 2 '(define a 1) (define a 2) a'
 run redefine-function 2 '(defun f (x) 1) (defun f (x) 2) (f 0)'

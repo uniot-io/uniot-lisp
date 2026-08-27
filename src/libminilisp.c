@@ -1416,6 +1416,11 @@ static Obj *read_list(void *root) {
         if (*obj == Cparen)
             return reverse(*head);
         if (*obj == Dot) {
+            // Nothing before the dot means there is no cell to give a tail to, and the
+            // line below would write through Nil -- a shared constant, and not a cell.
+            // It read as () before, which is not what anyone typing (. x) meant.
+            if (*head == Nil)
+                error("Stray dot");
             *last = read_expr(root);
             if (read_expr(root) != Cparen)
                 error("Closed parenthesis expected after dot");
@@ -1573,13 +1578,21 @@ static Obj *push_env(void *root, Obj **env, Obj **vars, Obj **vals) {
     *map = Nil;
     for (; (*vars)->type == TCELL; *vars = (*vars)->cdr, *vals = (*vals)->cdr) {
         if ((*vals)->type != TCELL)
-            error("Cannot apply function: number of argument does not match");
+            error("Cannot apply function: too few arguments");
         *sym = (*vars)->car;
         *val = (*vals)->car;
         *map = acons(root, sym, val, map);
     }
+
+    // Whatever is left of the parameters is the symbol that takes the rest, if there is
+    // one. Without it there is nothing left to put the surplus in, and passing it anyway
+    // used to be accepted in silence -- while passing too few raised. Two ways of calling
+    // a function wrongly should not differ in whether they are noticed.
     if (*vars != Nil)
         *map = acons(root, vars, vals, map);
+    else if (*vals != Nil)
+        error("Cannot apply function: too many arguments");
+
     return make_env(root, map, env);
 }
 
@@ -1760,6 +1773,12 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
         case TINT:
         case TPRIMITIVE:
         case TFUNCTION:
+        // A macro is a value like any other here. It is reachable through a form built
+        // at run time -- (eval (cons m args)) -- where the head is the macro object
+        // rather than a symbol, and expansion above only recognises the symbol. Without
+        // this it fell to the default below and reported an internal bug, where what is
+        // wanted is the ordinary complaint that the head of a list must be a function.
+        case TMACRO:
         case TTRUE:
         case TNIL:
             value = *obj;
@@ -2221,14 +2240,35 @@ static Obj *prim_gte(void *root, Obj **env, Obj **list) {
 }
 
 static Obj *handle_function(void *root, Obj **env, Obj **list, int type) {
-    if ((*list)->type != TCELL || !is_list((*list)->car) || (*list)->cdr->type != TCELL)
+    // The parameters are a list, possibly ending in a symbol that takes the rest, or a
+    // bare symbol that takes all of them. The last is the same mechanism as the second
+    // with nothing required first, and push_env already binds it: a symbol is not a cell,
+    // so it falls past the loop to the line that binds whatever is left over.
+    if ((*list)->type != TCELL || (*list)->cdr->type != TCELL ||
+        (!is_list((*list)->car) && (*list)->car->type != TSYMBOL))
         error("Malformed lambda");
+    // Names must be distinct. Binding the same one twice is a typo every time -- the
+    // second binding simply hides the first, which is deterministic but only if you know
+    // that a later parameter is consed on later and so is found first. The standards this
+    // borrows from call it an error, and it is the last thing here that was wrong quietly.
+    // Quadratic, over a list short enough that it does not matter, and only when a
+    // function is defined.
     Obj *p = (*list)->car;
-    for (; p->type == TCELL; p = p->cdr)
+    for (; p->type == TCELL; p = p->cdr) {
         if (p->car->type != TSYMBOL)
             error("Parameter must be a symbol");
-    if (p != Nil && p->type != TSYMBOL)
-        error("Parameter must be a symbol");
+        for (Obj *q = (*list)->car; q != p; q = q->cdr)
+            if (q->car == p->car)
+                error("Duplicate parameter: %s", p->car->name);
+    }
+    if (p != Nil) {
+        if (p->type != TSYMBOL)
+            error("Parameter must be a symbol");
+        // The rest parameter counts too: (a . a) hid the fixed one behind it.
+        for (Obj *q = (*list)->car; q->type == TCELL; q = q->cdr)
+            if (q->car == p)
+                error("Duplicate parameter: %s", p->name);
+    }
     DEFINE2(params, body);
     *params = (*list)->car;
     *body = (*list)->cdr;
