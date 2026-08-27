@@ -401,7 +401,7 @@ static bool gc_verify_type_known(unsigned char type) {
 // Constructors
 //======================================================================
 
-Obj *make_int(void *root, int value) {
+Obj *make_int(void *root, int32_t value) {
     Obj *r = alloc(root, TINT, sizeof(int));
     r->value = value;
     return r;
@@ -595,10 +595,10 @@ static Obj *read_quote(void *root) {
 // The negative case is read as a positive magnitude and negated by the caller, so the
 // limit here is INT_MAX and INT_MIN cannot be written as a literal. Accepting one more
 // digit only where a minus sign preceded it is more machinery than the case deserves.
-static int read_number(int val) {
+static int32_t read_number(int32_t val) {
     while (isdigit(peek())) {
-        const int digit = buffer_getchar() - '0';
-        if (val > (INT_MAX - digit) / 10)
+        const int32_t digit = buffer_getchar() - '0';
+        if (val > (LISP_INT_MAX - digit) / 10)
             error("Integer literal is too large");
         val = val * 10 + digit;
     }
@@ -679,7 +679,7 @@ int print_to_buf(char *buf, size_t size, int pos, Obj *obj) {
 #define CASE(type, ...)                                     \
     case type:                                              \
         return printf_to_handler(buf, size, pos, __VA_ARGS__);
-    CASE(TINT, "%d", obj->value);
+    CASE(TINT, "%" LISP_INT_FMT, obj->value);
     CASE(TSYMBOL, "%s", obj->name);
     CASE(TPRIMITIVE, "<primitive>");
     CASE(TFUNCTION, "<function>");
@@ -1307,8 +1307,8 @@ static Obj *prim_gensym(void *root, Obj **env, Obj **list) {
 // The builtins do the arithmetic and report the overflow without ever producing the
 // undefined result. Available on all three toolchains this is built with.
 #define ARITH_OP(name, builtin, what)                            \
-    static int name(int a, int b) {                              \
-        int r;                                                   \
+    static int32_t name(int32_t a, int32_t b) {                  \
+        int32_t r;                                               \
         if (builtin(a, b, &r))                                   \
             error("Integer overflow in " what);                  \
         return r;                                                \
@@ -1320,7 +1320,7 @@ ARITH_OP(mul_checked, __builtin_mul_overflow, "*")
 
 // (+ <integer> ...)
 static Obj *prim_plus(void *root, Obj **env, Obj **list) {
-    int sum = 0;
+    int32_t sum = 0;
     for (Obj *args = eval_list(root, env, list); args != Nil; args = args->cdr) {
         if (args->car->type != TINT)
             error("+ takes only numbers");
@@ -1342,7 +1342,7 @@ static Obj *prim_minus(void *root, Obj **env, Obj **list) {
             error("- takes only numbers");
     if (args->cdr == Nil)
         return make_int(root, sub_checked(0, args->car->value));
-    int r = args->car->value;
+    int32_t r = args->car->value;
     for (Obj *p = args->cdr; p != Nil; p = p->cdr)
         r = sub_checked(r, p->car->value);
     return make_int(root, r);
@@ -1362,7 +1362,7 @@ static Obj *prim_modulo(void *root, Obj **env, Obj **list) {
         error("Division by zero");
     // The remainder of the one division that overflows. Mathematically zero, but the
     // instruction traps on some targets, so it is answered rather than computed.
-    if (x->value == INT_MIN && y->value == -1)
+    if (x->value == LISP_INT_MIN && y->value == -1)
         return make_int(root, 0);
 
     return make_int(root, x->value % y->value);
@@ -1394,10 +1394,10 @@ static Obj *prim_div(void *root, Obj **env, Obj **list) {
     // 32 bit integer, so (/ 100000000 3) came out as 33333334 -- and on a chip without
     // a floating point unit it was software arithmetic as well. Truncates towards zero,
     // as `%` does, so (/ x y) and (% x y) agree about which way the quotient went.
-    int r = args->car->value;
+    int32_t r = args->car->value;
     for (Obj *p = args->cdr; p != Nil; p = p->cdr) {
         // The one division that overflows: INT_MIN / -1 has no positive counterpart.
-        if (r == INT_MIN && p->car->value == -1)
+        if (r == LISP_INT_MIN && p->car->value == -1)
             error("Integer overflow in /");
         r /= p->car->value;
     }
@@ -1424,7 +1424,7 @@ static Obj *prim_mul(void *root, Obj **env, Obj **list) {
     if (args->car->value == 0)
         return make_int(root, 0);
 
-    int r = args->car->value;
+    int32_t r = args->car->value;
     for (Obj *p = args->cdr; p != Nil; p = p->cdr)
         r = mul_checked(r, p->car->value);
 
@@ -1853,7 +1853,7 @@ void add_constant(void *root, Obj **env, const char *name, Obj **val) {
     add_variable(root, env, sym, val);
 }
 
-void add_constant_int(void *root, Obj **env, const char *name, int value) {
+void add_constant_int(void *root, Obj **env, const char *name, int32_t value) {
     DEFINE1(val);
     *val = make_int(root, value);
     add_constant(root, env, name, val);

@@ -94,6 +94,13 @@ extern "C" {
 #define MINILISP_MAX_TAIL_CALLS MINILISP_MAX_LOOP_ITERATIONS
 #endif
 
+// The range a script sees, and the format for printing one. PRId32 rather than "%d"
+// because int32_t is `long` on RISC-V targets and `int` elsewhere, so no single literal
+// specifier is right for all of them.
+#define LISP_INT_MAX INT32_MAX
+#define LISP_INT_MIN INT32_MIN
+#define LISP_INT_FMT PRId32
+
 #define ROOT_END ((void *)-1)
 
 #define ADD_ROOT(size)                   \
@@ -159,6 +166,7 @@ extern "C" {
 
 #include <assert.h>
 #include <ctype.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -241,8 +249,11 @@ typedef struct Obj
 
     // Object values.
     union {
-        // Int
-        int value;
+        // Int. Fixed at 32 bits rather than left as `int`, because the width is part of
+        // what the language promises now that the arithmetic raises on overflow: the
+        // limit a script runs into is this type's, so it should be stated here and not
+        // inherited from whatever the target calls an int.
+        int32_t value;
         // Cell
         struct
         {
@@ -447,7 +458,7 @@ Obj *eval(void *root, Obj **env, Obj **obj);
 
 Obj *eval_list(void *root, Obj **env, Obj **list);
 
-Obj *make_int(void *root, int value);
+Obj *make_int(void *root, int32_t value);
 
 Obj *make_symbol(void *root, const char *name);
 
@@ -469,7 +480,7 @@ void add_primitive(void *root, Obj **env, const char *name, Primitive *fn);
 
 void add_constant(void *root, Obj **env, const char *name, Obj **val);
 
-void add_constant_int(void *root, Obj **env, const char *name, int value);
+void add_constant_int(void *root, Obj **env, const char *name, int32_t value);
 
 Obj *get_variable(void *root, Obj **env, const char *name);
 
