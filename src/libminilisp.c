@@ -383,882 +383,16 @@ static bool gc_verify_type_known(unsigned char type) {
 #endif  // MINILISP_GC_DEBUG
 
 //======================================================================
-// Garbage collector: copying (Cheney)
+// Garbage collector: the strategy itself
 //======================================================================
+//
+// One of these implements the six functions described above. Which one is fixed when
+// the library is compiled, so nothing outside pays for the choice at run time, and the
+// selection is here rather than spread through the file.
 #if MINILISP_GC == MINILISP_GC_COPYING
-
-// The available memory is split into two halves and all objects are moved from one half to another
-// every time GC is invoked. That means the address of the object keeps changing, which is why every
-// reference from C has to live in the root chain rather than in a bare local.
-
-// The pointer pointing to the beginning of the current heap
-static void *memory = NULL;
-
-// The pointer pointing to the beginning of the old heap
-static void *from_space = NULL;
-
-// The number of bytes allocated from the heap
-static size_t mem_nused = 0;
-
-// Cheney's algorithm uses two pointers to keep track of GC status. At first both pointers point to
-// the beginning of the to-space. As GC progresses, they are moved towards the end of the
-// to-space. The objects before "scan1" are the objects that are fully copied. The objects between
-// "scan1" and "scan2" have already been copied, but may contain pointers to the from-space. "scan2"
-// points to the beginning of the free space.
-static Obj *scan1;
-static Obj *scan2;
-
-// Moves one object from the from-space to the to-space. Returns the object's new address. If the
-// object has already been moved, does nothing but just returns the new address.
-static inline Obj *forward(Obj *obj) {
-    // If the object's address is not in the from-space, the object is not managed by GC nor it
-    // has already been moved to the to-space.
-    ptrdiff_t offset = (uint8_t *)obj - (uint8_t *)from_space;
-    if (offset < 0 || MEMORY_SIZE <= (size_t)offset)
-        return obj;
-
-    // The pointer is pointing to the from-space, but the object there was a tombstone. Follow the
-    // forwarding pointer to find the new location of the object.
-    if (obj->type == TMOVED)
-        return (Obj *)obj->moved;
-
-    // Otherwise, the object has not been moved yet. Move it.
-    Obj *newloc = scan2;
-    memcpy(newloc, obj, obj->size);
-    scan2 = (Obj *)((uint8_t *)scan2 + obj->size);
-
-    // Put a tombstone at the location where the object used to occupy, so that the following call
-    // of forward() can find the object's new location.
-    obj->type = TMOVED;
-    obj->moved = newloc;
-    return newloc;
-}
-
-static void *alloc_semispace() {
-#if MINILISP_GC_DEBUG
-    if (fail_gc_alloc)
-        return NULL;
-#endif
-    void *space = malloc(MEMORY_SIZE);
-    if (space != NULL)
-        STATS_SYSTEM_ADD(MEMORY_SIZE);
-    return space;
-}
-
-// Copies the root objects.
-static void forward_root_objects(void *root) {
-    Symbols = forward(Symbols);
-    for (void **frame = (void **)root; frame; frame = *(void ***)frame)
-        for (int i = 1; frame[i] != ROOT_END; i++)
-            if (frame[i])
-                frame[i] = forward((Obj *)frame[i]);
-}
-
-// Implements Cheney's copying garbage collection algorithm.
-// http://en.wikipedia.org/wiki/Cheney%27s_algorithm
-void gc(void *root) {
-    LISP_ASSERT(!gc_running);
-    gc_running = true;
-
-#if MINILISP_GC_STATS
-    // Started here rather than after the allocation below, because obtaining the second
-    // semi-space is part of what a collection costs under this strategy.
-    const uint64_t stats_started = stats_now();
-#endif
-
-    // Allocate a new semi-space. `memory` and `from_space` are left untouched until
-    // the allocation has succeeded, so that a failure leaves the current heap intact
-    // and error() can unwind to safe_eval() with the interpreter still usable.
-    //
-    // This is a copying collector, so a collection needs a second heap of MEMORY_SIZE
-    // bytes in addition to the one already held. On a fragmented heap that request can
-    // fail even when the total free memory looks sufficient, because it must be
-    // contiguous. Before this check, the collector copied into the NULL it got back.
-    void *to_space = alloc_semispace();
-    if (to_space == NULL) {
-        // gc_running is cleared by error() before it unwinds.
-        error("Out of memory: cannot allocate a GC semi-space of %u bytes",
-              (unsigned)MEMORY_SIZE);
-    }
-    from_space = memory;
-    memory = to_space;
-
-    // Initialize the two pointers for GC. Initially they point to the beginning of the to-space.
-    scan1 = scan2 = (Obj *)memory;
-
-    // Copy the GC root objects first. This moves the pointer scan2.
-    forward_root_objects(root);
-
-    // Copy the objects referenced by the GC root objects located between scan1 and scan2. Once it's
-    // finished, all live objects (i.e. objects reachable from the root) will have been copied to
-    // the to-space.
-    while (scan1 < scan2) {
-        switch (scan1->type) {
-        case TINT:
-        case TSYMBOL:
-        case TPRIMITIVE:
-            // Any of the above types does not contain a pointer to a GC-managed object.
-            break;
-        case TCELL:
-            scan1->car = forward(scan1->car);
-            scan1->cdr = forward(scan1->cdr);
-            break;
-        case TFUNCTION:
-        case TMACRO:
-            scan1->params = forward(scan1->params);
-            scan1->body = forward(scan1->body);
-            scan1->env = forward(scan1->env);
-            break;
-        case TENV:
-            scan1->vars = forward(scan1->vars);
-            scan1->up = forward(scan1->up);
-            break;
-        default:
-            // Not recoverable: roots have been partially forwarded, so unwinding here
-            // leaves the heap inconsistent and leaks from_space. It signals a bug in
-            // the collector rather than a runtime condition.
-            error("Bug: copy: unknown type %d", scan1->type);
-        }
-        scan1 = (Obj *)((uint8_t *)scan1 + scan1->size);
-    }
-
-    // Finish up GC.
-    free(from_space);
-    STATS_SYSTEM_SUB(MEMORY_SIZE);
-    const size_t live = (size_t)((uint8_t *)scan1 - (uint8_t *)memory);
-#if MINILISP_GC_DEBUG
-    // mem_nused still holds the pre-collection figure at this point.
-    if (debug_gc)
-        printf_to_handler(NULL, 0, 0, "GC: %zu bytes out of %zu bytes copied.\n", live, mem_nused);
-#endif
-    mem_nused = live;
-    gc_running = false;
-
-#if MINILISP_GC_STATS
-    lisp_stats.collections++;
-    // Every live byte was physically moved, and no dead byte was looked at.
-    lisp_stats.traced_bytes += live;
-    // Compaction leaves the free space in one run, always.
-    lisp_stats.free_blocks = 1;
-    lisp_stats.free_largest = MEMORY_SIZE - live;
-    stats_add_gc_time(stats_started);
-#endif
-
-#if MINILISP_GC_DEBUG
-    if (verify_gc)
-        gc_verify(root);
-#endif
-}
-
-//----------------------------------------------------------------------
-// Strategy interface
-//----------------------------------------------------------------------
-
-static bool gc_heap_create(void) {
-    memory = alloc_semispace();
-    mem_nused = 0;
-    return memory != NULL;
-}
-
-static void gc_heap_destroy(void) {
-    if (memory != NULL)
-        STATS_SYSTEM_SUB(MEMORY_SIZE);
-    free(memory);
-    memory = NULL;
-    from_space = NULL;
-    mem_nused = 0;
-}
-
-static Obj *gc_alloc_raw(void *root, size_t size) {
-    // With the debug flag on, collect before every allocation so that every object moves and any
-    // stale C-side pointer is caught immediately rather than by luck.
-    if (always_gc && !gc_running)
-        gc(root);
-
-    // Otherwise collect only when the remaining space is not large enough.
-    if (!always_gc && MEMORY_SIZE < mem_nused + size)
-        gc(root);
-
-    // Give up if the request still cannot be satisfied, which happens when it is larger than the
-    // heap or when the from-space held too many live objects. This collector compacts, so what
-    // is free is one run and its size is the whole story.
-    if (MEMORY_SIZE < mem_nused + size)
-        error("Memory exhausted: %u wanted, %u free",
-              (unsigned)size, (unsigned)(MEMORY_SIZE - mem_nused));
-
-    Obj *obj = (Obj *)((char *)memory + mem_nused);
-    mem_nused += size;
-    obj->size = (uint16_t)size;
-    return obj;
-}
-
-static size_t gc_mem_used(void) {
-    return mem_nused;
-}
-
-static bool gc_owns(const void *p) {
-    if (memory == NULL)
-        return false;
-    const uint8_t *base = (const uint8_t *)memory;
-    const uint8_t *ptr = (const uint8_t *)p;
-    return ptr >= base && ptr < base + mem_nused;
-}
-
-//----------------------------------------------------------------------
-// Heap verification
-//----------------------------------------------------------------------
-#if MINILISP_GC_DEBUG
-
-// Every reference held by a live object must address either managed storage or one of
-// the statically allocated literals. A reference pointing anywhere else survived a
-// collection without being updated, which is the failure a copying collector is prone
-// to. NULL is tolerated: the root macros zero their slots before they are filled.
-static void gc_verify_ref(const Obj *ref, const char *field, size_t offset) {
-    if (ref == NULL)
-        return;
-    if (ref >= &literals[0] && ref < &literals[sizeof(literals) / sizeof(literals[0])])
-        return;
-    if (gc_owns(ref))
-        return;
-    gc_verify_fail("GC verify: %s of the object at offset %u points outside the heap",
-                   field, (unsigned)offset);
-}
-
-static void gc_verify(void *root) {
-    const uint8_t *base = (const uint8_t *)memory;
-    const uint8_t *end = base + mem_nused;
-    const uint8_t *p = base;
-    size_t counted = 0;
-
-    while (p < end) {
-        const Obj *obj = (const Obj *)p;
-        const size_t offset = (size_t)(p - base);
-
-        if (!gc_verify_type_known(obj->type))
-            gc_verify_fail("GC verify: unknown type %d at offset %u", obj->type, (unsigned)offset);
-        if (obj->type == TMOVED)
-            gc_verify_fail("GC verify: forwarding tombstone left live at offset %u", (unsigned)offset);
-        if (obj->type >= TTRUE)
-            gc_verify_fail("GC verify: statically allocated type %d found in the heap at offset %u",
-                           obj->type, (unsigned)offset);
-        if ((size_t)obj->size < offsetof(Obj, value))
-            gc_verify_fail("GC verify: implausible size %u at offset %u",
-                           (unsigned)obj->size, (unsigned)offset);
-        if ((size_t)obj->size % sizeof(void *) != 0)
-            gc_verify_fail("GC verify: misaligned size %u at offset %u",
-                           (unsigned)obj->size, (unsigned)offset);
-        if (p + obj->size > end)
-            gc_verify_fail("GC verify: the object at offset %u runs past the end of the heap",
-                           (unsigned)offset);
-
-        switch (obj->type) {
-        case TCELL:
-            gc_verify_ref(obj->car, "car", offset);
-            gc_verify_ref(obj->cdr, "cdr", offset);
-            break;
-        case TFUNCTION:
-        case TMACRO:
-            gc_verify_ref(obj->params, "params", offset);
-            gc_verify_ref(obj->body, "body", offset);
-            gc_verify_ref(obj->env, "env", offset);
-            break;
-        case TENV:
-            gc_verify_ref(obj->vars, "vars", offset);
-            gc_verify_ref(obj->up, "up", offset);
-            break;
-        default:
-            break;
-        }
-
-        counted += (size_t)obj->size;
-        p += obj->size;
-    }
-
-    if (counted != mem_nused)
-        gc_verify_fail("GC verify: live objects total %u bytes but mem_nused is %u",
-                       (unsigned)counted, (unsigned)mem_nused);
-
-    // The roots are what the collection was driven from, so a stale one here means an
-    // object was reached but never updated.
-    for (void **frame = (void **)root; frame; frame = *(void ***)frame)
-        for (int i = 1; frame[i] != ROOT_END; i++)
-            gc_verify_ref((const Obj *)frame[i], "root slot", 0);
-
-    gc_verify_ref(Symbols, "the symbol table", 0);
-}
-#endif  // MINILISP_GC_DEBUG
-
-//======================================================================
-// Garbage collector: mark-sweep
-//======================================================================
+#include "gc_copying.inc"
 #elif MINILISP_GC == MINILISP_GC_MARK_SWEEP
-
-// Objects are cut out of a free list and then stay where they were put. A collection
-// marks everything reachable from the roots, then walks the heap from one end to the
-// other and gives back what is not marked, merging neighbouring holes as it goes.
-//
-// Nothing is copied, so a collection needs no memory beyond the heap it already holds.
-// That is the reason to want this strategy on a device: the copying collector has to ask
-// the system for a second heap of MEMORY_SIZE contiguous bytes at the exact moment
-// memory is tight, and on a fragmented heap that request can fail while plenty of total
-// memory remains. Here there is nothing to fail. Objects also keep their addresses, so a
-// reference that escaped the root chain still points at its object.
-//
-// The costs sit on the other side. Allocation searches for a block that fits instead of
-// bumping a pointer, a collection touches dead objects as well as live ones, and the free
-// space ends up in pieces rather than in one run.
-//
-// That last one is what invites a compacting collector, and it was measured rather than
-// assumed. Soak runs totalling some nineteen thousand collections, on a host and on an
-// ESP8266, settle within a few hundred collections and then never drift: sweep rebuilds
-// the free list from scratch every time, merging neighbours, so the heap keeps no memory
-// of its own history and its shape follows where the live data is. The worst largest
-// free block seen on target was 692 bytes, against a largest possible object of 72 -- a
-// symbol at SYMBOL_MAX_LEN.
-//
-// Worth revisiting if a variable-length type with large values ever arrives, real strings
-// or a much larger SYMBOL_MAX_LEN, because that margin is what makes this safe. A device
-// reporting "Memory exhausted" with a large free total and a small largest block is the
-// same thing said out loud.
-
-// The heap, and the length actually used. MEMORY_SIZE is rounded down to a whole number
-// of words: every block size is a multiple of the word size, so a ragged tail could never
-// be handed out anyway, and truncating keeps every block on an aligned address.
-static uint8_t *heap = NULL;
-static size_t heap_size = 0;
-
-// The free blocks, in address order. Sweep rebuilds this from nothing each time.
-static Obj *free_list = NULL;
-
-// The number of bytes held by live objects. Free blocks are not counted, and neither is
-// the handful of bytes lost when a block is handed over whole.
-static size_t mem_nused = 0;
-
-// The smallest block that can be described: a free block has to hold the tag, the size,
-// and the link to the next free block. No object is smaller than this either -- the
-// smallest is an integer, which is the same tag and size plus one word of value -- so any
-// block that falls free is large enough to say so.
-#define MS_MIN_BLOCK (offsetof(Obj, value) + sizeof(void *))
-
-// The mark bit lives in the top bit of the tag, which the twelve tags leave spare, so
-// marking costs no memory at all. It is set only between the first and last line of
-// gc(), and no interpreter code runs in that window.
-#define MS_MARK 0x80
-
-static inline bool ms_marked(const Obj *obj) { return (obj->type & MS_MARK) != 0; }
-static inline void ms_set_mark(Obj *obj) { obj->type = (unsigned char)(obj->type | MS_MARK); }
-static inline unsigned char ms_type(const Obj *obj) { return (unsigned char)(obj->type & ~MS_MARK); }
-static inline void ms_clear_mark(Obj *obj) { obj->type = ms_type(obj); }
-
-// A free block keeps the link to its successor where an object would keep its value.
-static inline Obj *ms_next_free(const Obj *block) { return (Obj *)block->moved; }
-static inline void ms_set_next_free(Obj *block, Obj *next) { block->moved = next; }
-
-static inline bool ms_in_heap(const void *p) {
-    return heap != NULL && (const uint8_t *)p >= heap && (const uint8_t *)p < heap + heap_size;
-}
-
-//----------------------------------------------------------------------
-// Marking
-//----------------------------------------------------------------------
-
-// Marking may not recurse. The C stack on a device is a few kilobytes and a list is as
-// deep as it is long, so the work waits in an array of fixed size instead.
-static Obj *mark_stack[MINILISP_GC_MARK_STACK];
-static int mark_sp = 0;
-static bool mark_overflow = false;
-
-// Marks an object and notes that its references still have to be followed. Anything that
-// is not in the heap -- a null slot, one of the statically allocated literals -- is not
-// ours to mark and is simply ignored.
-//
-// The stack filling up is not a failure. The object is marked either way and only the
-// note is lost, which ms_mark() recovers by rereading the heap. The overflow flag is set
-// only on the branch that has just marked something new, so each recovery pass marks at
-// least one more object and the process ends.
-static void ms_mark_push(Obj *obj) {
-    if (obj == NULL || !ms_in_heap(obj) || ms_marked(obj))
-        return;
-    ms_set_mark(obj);
-    if (mark_sp < MINILISP_GC_MARK_STACK) {
-        mark_stack[mark_sp++] = obj;
-#if MINILISP_GC_STATS
-        if ((size_t)mark_sp > lisp_stats.mark_stack_peak)
-            lisp_stats.mark_stack_peak = (size_t)mark_sp;
-#endif
-    } else {
-        mark_overflow = true;
-    }
-}
-
-// Marks everything the given object refers to.
-static void ms_mark_children(Obj *obj) {
-    switch (ms_type(obj)) {
-    case TINT:
-    case TSYMBOL:
-    case TPRIMITIVE:
-        // None of these refers to a collected object.
-        break;
-    case TCELL:
-        ms_mark_push(obj->car);
-        ms_mark_push(obj->cdr);
-        break;
-    case TFUNCTION:
-    case TMACRO:
-        ms_mark_push(obj->params);
-        ms_mark_push(obj->body);
-        ms_mark_push(obj->env);
-        break;
-    case TENV:
-        ms_mark_push(obj->vars);
-        ms_mark_push(obj->up);
-        break;
-    default:
-        // Unlike the copying collector, this is worth surviving. Nothing has been moved
-        // or freed yet and the marks are cleared at the start of every collection, so
-        // unwinding from here leaves a heap that still works.
-        error("Bug: mark: unknown type %d", ms_type(obj));
-    }
-}
-
-static void ms_mark_drain(void) {
-    while (mark_sp > 0)
-        ms_mark_children(mark_stack[--mark_sp]);
-}
-
-static void ms_mark(void *root) {
-    // Clear every mark first. A collection that unwound partway -- a bug caught above,
-    // an error raised out of a primitive -- leaves marks behind otherwise, and a stale
-    // mark is the one kind of leftover that loses data: the next collection takes the
-    // object for already scanned, never follows its references, and frees what it holds.
-    for (uint8_t *p = heap; p < heap + heap_size; ) {
-        Obj *obj = (Obj *)p;
-        ms_clear_mark(obj);
-        p += obj->size;
-    }
-#if MINILISP_GC_STATS
-    lisp_stats.walked_bytes += heap_size;
-#endif
-
-    mark_sp = 0;
-    mark_overflow = false;
-
-    ms_mark_push(Symbols);
-    for (void **frame = (void **)root; frame; frame = *(void ***)frame)
-        for (int i = 1; frame[i] != ROOT_END; i++)
-            if (frame[i])
-                ms_mark_push((Obj *)frame[i]);
-    ms_mark_drain();
-
-    // Recover whatever the work stack could not hold. A marked object may still have
-    // references that were never followed, and the heap itself records which objects are
-    // marked, so it can be read back as the queue that overflowed.
-    while (mark_overflow) {
-        mark_overflow = false;
-#if MINILISP_GC_STATS
-        lisp_stats.mark_rescues++;
-        lisp_stats.walked_bytes += heap_size;
-#endif
-        for (uint8_t *p = heap; p < heap + heap_size; ) {
-            Obj *obj = (Obj *)p;
-            const size_t size = (size_t)obj->size;
-            if (ms_marked(obj)) {
-                ms_mark_children(obj);
-                ms_mark_drain();
-            }
-            p += size;
-        }
-    }
-}
-
-//----------------------------------------------------------------------
-// Sweeping
-//----------------------------------------------------------------------
-
-// Turns a run of adjacent dead or already free blocks into one free block and appends it
-// to the list being built. Merging here is what keeps the free space in usable pieces;
-// without it a heap that had held many small objects could not satisfy a large request
-// however much of it was free.
-static void ms_release(uint8_t *start, size_t size, Obj **head, Obj **tail) {
-    Obj *block = (Obj *)start;
-#if MINILISP_GC_DEBUG
-    // Scribble over the part of the block the free header does not need, so that an
-    // object read through a pointer that outlived it shows nothing plausible.
-    memset(start + MS_MIN_BLOCK, 0xDD, size - MS_MIN_BLOCK);
-#endif
-    block->type = TFREE;
-    block->constant = false;
-    block->size = (uint16_t)size;
-    ms_set_next_free(block, NULL);
-
-    if (*tail == NULL)
-        *head = block;
-    else
-        ms_set_next_free(*tail, block);
-    *tail = block;
-}
-
-static void ms_sweep(void) {
-    Obj *head = NULL;
-    Obj *tail = NULL;
-    const uint8_t *end = heap + heap_size;
-    uint8_t *run = NULL;  // start of the run of free memory being accumulated
-    size_t run_size = 0;
-    size_t live = 0;
-
-    for (uint8_t *p = heap; p < end; ) {
-        Obj *obj = (Obj *)p;
-        const size_t size = (size_t)obj->size;
-
-        if (ms_marked(obj)) {
-            ms_clear_mark(obj);
-            live += size;
-            if (run != NULL) {
-                ms_release(run, run_size, &head, &tail);
-                run = NULL;
-            }
-        } else {
-            // Dead, or free already. Either way it joins the run, and that is where
-            // neighbouring holes become one block again.
-            if (run == NULL) {
-                run = p;
-                run_size = 0;
-            }
-            run_size += size;
-        }
-        p += size;
-    }
-    if (run != NULL)
-        ms_release(run, run_size, &head, &tail);
-
-    free_list = head;
-    mem_nused = live;
-
-#if MINILISP_GC_STATS
-    // Sweep is the one pass that has to touch dead data as well as live, which is the
-    // cost this strategy pays for not moving anything.
-    lisp_stats.walked_bytes += heap_size;
-    lisp_stats.free_blocks = 0;
-    lisp_stats.free_largest = 0;
-    for (const Obj *b = free_list; b != NULL; b = ms_next_free(b)) {
-        lisp_stats.free_blocks++;
-        if ((size_t)b->size > lisp_stats.free_largest)
-            lisp_stats.free_largest = (size_t)b->size;
-    }
-#endif
-}
-
-void gc(void *root) {
-    LISP_ASSERT(!gc_running);
-    gc_running = true;
-
-#if MINILISP_GC_DEBUG
-    const size_t before = mem_nused;
-#endif
-#if MINILISP_GC_STATS
-    const uint64_t stats_started = stats_now();
-#endif
-
-    ms_mark(root);
-    ms_sweep();
-
-#if MINILISP_GC_STATS
-    lisp_stats.collections++;
-    // What survived is what marking had to reach and sweep had to keep.
-    lisp_stats.traced_bytes += mem_nused;
-    stats_add_gc_time(stats_started);
-#endif
-
-#if MINILISP_GC_DEBUG
-    if (debug_gc)
-        printf_to_handler(NULL, 0, 0, "GC: %zu bytes out of %zu bytes retained.\n", mem_nused, before);
-#endif
-
-    gc_running = false;
-
-#if MINILISP_GC_DEBUG
-    if (verify_gc)
-        gc_verify(root);
-#endif
-}
-
-//----------------------------------------------------------------------
-// Strategy interface
-//----------------------------------------------------------------------
-
-static bool gc_heap_create(void) {
-#if MINILISP_GC_DEBUG
-    // This strategy allocates only here, so this is the only place the hook can act.
-    // There is no counterpart to the copying collector's mid-run semi-space failure,
-    // because a collection never asks for memory.
-    if (fail_gc_alloc)
-        return false;
-#endif
-
-    heap_size = MEMORY_SIZE & ~(sizeof(void *) - 1);
-    // One free block has to be able to span the whole heap, so the heap cannot be longer
-    // than the size field can count. lisp_create() refuses such a request before getting
-    // here; this is the backstop for anyone setting MEMORY_SIZE directly.
-    if (heap_size < MS_MIN_BLOCK || heap_size > LISP_MAX_HEAP)
-        return false;
-
-    heap = (uint8_t *)malloc(heap_size);
-    if (heap == NULL) {
-        heap_size = 0;
-        return false;
-    }
-    STATS_SYSTEM_ADD(heap_size);
-
-    // The whole heap begins as a single free block.
-    Obj *block = (Obj *)heap;
-    block->type = TFREE;
-    block->constant = false;
-    block->size = (uint16_t)heap_size;
-    ms_set_next_free(block, NULL);
-
-    free_list = block;
-    mem_nused = 0;
-    return true;
-}
-
-static void gc_heap_destroy(void) {
-    if (heap != NULL)
-        STATS_SYSTEM_SUB(heap_size);
-    free(heap);
-    heap = NULL;
-    heap_size = 0;
-    free_list = NULL;
-    mem_nused = 0;
-    mark_sp = 0;
-    mark_overflow = false;
-}
-
-// Takes the first block large enough. What is left over goes back on the list if it is
-// big enough to describe itself; otherwise the whole block goes to the caller and the few
-// spare bytes travel with the object until it is freed again.
-//
-// First fit walks the list on every allocation, which is the price of not moving objects.
-// A heap broken into many small pieces makes that walk long, so if this ever shows up in
-// a profile, resuming the search where the last one stopped is the cheapest thing to try.
-static Obj *ms_take(size_t size) {
-    Obj *prev = NULL;
-    for (Obj *block = free_list; block != NULL; block = ms_next_free(block)) {
-        const size_t avail = (size_t)block->size;
-#if MINILISP_GC_STATS
-        lisp_stats.alloc_hops++;
-#endif
-        if (avail < size) {
-            prev = block;
-            continue;
-        }
-
-        Obj *next = ms_next_free(block);
-        const size_t rest = avail - size;
-        if (rest >= MS_MIN_BLOCK) {
-            Obj *remainder = (Obj *)((uint8_t *)block + size);
-            remainder->type = TFREE;
-            remainder->constant = false;
-            remainder->size = (uint16_t)rest;
-            ms_set_next_free(remainder, next);
-            next = remainder;
-            block->size = (uint16_t)size;
-        }
-
-        if (prev == NULL)
-            free_list = next;
-        else
-            ms_set_next_free(prev, next);
-
-        mem_nused += (size_t)block->size;
-        return block;
-    }
-    return NULL;
-}
-
-static Obj *gc_alloc_raw(void *root, size_t size) {
-    bool collected = false;
-
-    // With the debug flag on, collect before every allocation. Objects do not move here,
-    // so this no longer shakes out stale pointers the way it does under a copying
-    // collector; what it does catch is an object freed too early, because the block is
-    // retagged TFREE and scribbled over the moment nothing points at it.
-    if (always_gc && !gc_running) {
-        gc(root);
-        collected = true;
-    }
-
-    Obj *obj = ms_take(size);
-    if (obj == NULL && !collected && !gc_running) {
-        // Nothing fits. Collect and look again. This cannot fail for want of system
-        // memory, because collecting asks for none.
-        gc(root);
-        obj = ms_take(size);
-    }
-    if (obj == NULL) {
-        // Two very different situations end here, and a bare "Memory exhausted" cannot
-        // tell them apart: a heap that is genuinely full, and one with plenty of free
-        // bytes that are broken into pieces too small to use. Whoever has to size a
-        // device heap needs to know which, and only the collector is in a position to
-        // say, so the numbers go in the message. The walk costs nothing that matters:
-        // it happens once, on the way to raising.
-        size_t total = 0, largest = 0;
-        for (const Obj *b = free_list; b != NULL; b = ms_next_free(b)) {
-            total += (size_t)b->size;
-            if ((size_t)b->size > largest)
-                largest = (size_t)b->size;
-        }
-        // total close to size means full; total far above it with a small largest means
-        // fragmented.
-        error("Memory exhausted: %u wanted, %u free, largest block %u",
-              (unsigned)size, (unsigned)total, (unsigned)largest);
-    }
-
-    return obj;
-}
-
-static size_t gc_mem_used(void) {
-    return mem_nused;
-}
-
-// Ownership, not liveness: the answer is the same for a free block, which is what the
-// caller of is_valid_ptr wants, since reading a freed block raises rather than crashes.
-static bool gc_owns(const void *p) {
-    return ms_in_heap(p);
-}
-
-//----------------------------------------------------------------------
-// Heap verification
-//----------------------------------------------------------------------
-#if MINILISP_GC_DEBUG
-
-// Every reference held by a live object must address either a live object in the heap or
-// one of the statically allocated literals. Pointing at a free block is the failure a
-// non-moving collector is prone to: the object was collected while something still held
-// it. NULL is tolerated, because the root macros zero their slots before filling them.
-static void gc_verify_ref(const Obj *ref, const char *field, size_t offset) {
-    if (ref == NULL)
-        return;
-    if (ref >= &literals[0] && ref < &literals[sizeof(literals) / sizeof(literals[0])])
-        return;
-    if (!gc_owns(ref))
-        gc_verify_fail("GC verify: %s of the object at offset %u points outside the heap",
-                       field, (unsigned)offset);
-    if (ms_type(ref) == TFREE)
-        gc_verify_fail("GC verify: %s of the object at offset %u points at a freed block",
-                       field, (unsigned)offset);
-    if (!gc_verify_type_known(ms_type(ref)))
-        gc_verify_fail("GC verify: %s of the object at offset %u points at type %d, which is not an object",
-                       field, (unsigned)offset, ms_type(ref));
-}
-
-static void gc_verify(void *root) {
-    const uint8_t *end = heap + heap_size;
-    size_t live = 0;
-    size_t free_bytes = 0;
-    size_t free_blocks = 0;
-    bool prev_was_free = false;
-
-    for (const uint8_t *p = heap; p < end; ) {
-        const Obj *obj = (const Obj *)p;
-        const size_t offset = (size_t)(p - heap);
-        const unsigned char type = ms_type(obj);
-
-        // Marks belong to a collection in progress and nothing else.
-        if (ms_marked(obj))
-            gc_verify_fail("GC verify: mark left set at offset %u", (unsigned)offset);
-        if ((size_t)obj->size < MS_MIN_BLOCK)
-            gc_verify_fail("GC verify: implausible size %u at offset %u",
-                           (unsigned)obj->size, (unsigned)offset);
-        if ((size_t)obj->size % sizeof(void *) != 0)
-            gc_verify_fail("GC verify: misaligned size %u at offset %u",
-                           (unsigned)obj->size, (unsigned)offset);
-        if (p + obj->size > end)
-            gc_verify_fail("GC verify: the block at offset %u runs past the end of the heap",
-                           (unsigned)offset);
-
-        if (type == TFREE) {
-            // Sweep merges neighbours and a split cannot produce a pair, so two free
-            // blocks in a row mean the merge was missed and the space is now unusable
-            // for anything larger than either piece.
-            if (prev_was_free)
-                gc_verify_fail("GC verify: two free blocks in a row at offset %u, which sweep should have merged",
-                               (unsigned)offset);
-            free_bytes += (size_t)obj->size;
-            free_blocks++;
-            prev_was_free = true;
-        } else {
-            if (!gc_verify_type_known(type))
-                gc_verify_fail("GC verify: unknown type %d at offset %u", type, (unsigned)offset);
-            if (type == TMOVED)
-                gc_verify_fail("GC verify: a forwarding tombstone at offset %u, which this collector never writes",
-                               (unsigned)offset);
-            if (type >= TTRUE)
-                gc_verify_fail("GC verify: statically allocated type %d found in the heap at offset %u",
-                               type, (unsigned)offset);
-
-            switch (type) {
-            case TCELL:
-                gc_verify_ref(obj->car, "car", offset);
-                gc_verify_ref(obj->cdr, "cdr", offset);
-                break;
-            case TFUNCTION:
-            case TMACRO:
-                gc_verify_ref(obj->params, "params", offset);
-                gc_verify_ref(obj->body, "body", offset);
-                gc_verify_ref(obj->env, "env", offset);
-                break;
-            case TENV:
-                gc_verify_ref(obj->vars, "vars", offset);
-                gc_verify_ref(obj->up, "up", offset);
-                break;
-            default:
-                break;
-            }
-
-            live += (size_t)obj->size;
-            prev_was_free = false;
-        }
-
-        p += obj->size;
-    }
-
-    if (live != mem_nused)
-        gc_verify_fail("GC verify: live objects total %u bytes but mem_nused is %u",
-                       (unsigned)live, (unsigned)mem_nused);
-    // Nothing may go missing. Every byte of the heap is either in an object or on the
-    // free list, and a walk that ends anywhere else means a block size is wrong.
-    if (live + free_bytes != heap_size)
-        gc_verify_fail("GC verify: %u live bytes plus %u free bytes do not account for the %u byte heap",
-                       (unsigned)live, (unsigned)free_bytes, (unsigned)heap_size);
-
-    // The free list has to name exactly the free blocks the walk found, once each. A
-    // shorter list has mislaid memory; a longer one is about to hand the same block to
-    // two callers.
-    size_t listed = 0;
-    for (const Obj *block = free_list; block != NULL; block = ms_next_free(block)) {
-        if (!ms_in_heap(block))
-            gc_verify_fail("GC verify: the free list leaves the heap");
-        if (ms_type(block) != TFREE)
-            gc_verify_fail("GC verify: a live object is on the free list at offset %u",
-                           (unsigned)((const uint8_t *)block - heap));
-        if (++listed > free_blocks)
-            gc_verify_fail("GC verify: the free list is longer than the %u free blocks in the heap, so it repeats or loops",
-                           (unsigned)free_blocks);
-    }
-    if (listed != free_blocks)
-        gc_verify_fail("GC verify: the heap holds %u free blocks but the free list names %u",
-                       (unsigned)free_blocks, (unsigned)listed);
-
-    // The roots are what the marking was driven from, so a bad one here means an object
-    // was reached through something that is no longer an object.
-    for (void **frame = (void **)root; frame; frame = *(void ***)frame)
-        for (int i = 1; frame[i] != ROOT_END; i++)
-            gc_verify_ref((const Obj *)frame[i], "root slot", 0);
-
-    gc_verify_ref(Symbols, "the symbol table", 0);
-}
-#endif  // MINILISP_GC_DEBUG
-
+#include "gc_marksweep.inc"
 #else
 #error "Unknown MINILISP_GC strategy"
 #endif
@@ -1454,9 +588,20 @@ static Obj *read_quote(void *root) {
     return *tmp;
 }
 
+// Reads the digits of an integer literal. Checked for the same reason the arithmetic
+// is: this used to wrap, so a constant too large for the type became a different number
+// with nothing said -- 99999999999999999999 read as 1661992959.
+//
+// The negative case is read as a positive magnitude and negated by the caller, so the
+// limit here is INT_MAX and INT_MIN cannot be written as a literal. Accepting one more
+// digit only where a minus sign preceded it is more machinery than the case deserves.
 static int read_number(int val) {
-    while (isdigit(peek()))
-        val = val * 10 + (buffer_getchar() - '0');
+    while (isdigit(peek())) {
+        const int digit = buffer_getchar() - '0';
+        if (val > (INT_MAX - digit) / 10)
+            error("Integer literal is too large");
+        val = val * 10 + digit;
+    }
     return val;
 }
 
@@ -1543,8 +688,17 @@ int print_to_buf(char *buf, size_t size, int pos, Obj *obj) {
     CASE(TFREE, "<free>");
     CASE(TTRUE, "#t");
     CASE(TNIL, "()");
+    // Neither of these should reach a value a script can hold -- an environment is not
+    // exposed, and the two reader sentinels are refused before evaluation -- but a
+    // printer that raises is worse than one that prints something odd. This is the
+    // function a user calls to find out what went wrong.
+    CASE(TENV, "<env>");
+    CASE(TDOT, ".");
+    CASE(TCPAREN, ")");
 #undef CASE
     default:
+        // Every tag is named above, so this is a tag that does not exist: memory read as
+        // an object, which is the collector's failure and not something to print past.
         error("Bug: print: Unknown tag type: %d", obj->type);
     }
 }
@@ -1756,6 +910,42 @@ static Obj *prim_apply(void *root, Obj **env, Obj **list);
 //
 // Stopping early is the whole point: (and (consp x) (car x)) has to be safe to write, and
 // it is not if both operands are evaluated. Only () is false here, as it is for `if`.
+// Evaluates (apply f args) as far as the call itself. Returns the body left over for
+// the caller to evaluate in *newenv, or NULL when there was no tail to hand over -- a
+// primitive computes its own value -- in which case it is left in *settled.
+//
+// The call has to land in the caller's loop rather than be made here, or a loop written
+// through `apply` would grow the stack where the same loop written out does not.
+static Obj *apply_tail(void *root, Obj **env, Obj **list, Obj **newenv, Obj **settled) {
+    if (length(*list) != 2)
+        error("Malformed apply");
+    DEFINE4(fn, args, params, body);
+    *fn = (*list)->car;
+    *args = (*list)->cdr->car;
+    *fn = eval(root, env, fn);
+    *args = eval(root, env, args);
+    if (!is_list(*args))
+        error("apply expects a list of arguments");
+
+    if ((*fn)->type == TPRIMITIVE) {
+        *settled = apply_primitive(root, env, fn, args);
+        return NULL;
+    }
+    if ((*fn)->type != TFUNCTION)
+        error("The head of a list must be a function");
+
+    // The same as an ordinary call, with eval_list left out: these are values already.
+    *params = (*fn)->params;
+    *newenv = (*fn)->env;
+    *newenv = push_env(root, newenv, params, args);
+    *body = (*fn)->body;
+    if (*body == Nil) {
+        *settled = Nil;
+        return NULL;
+    }
+    return eval_but_last(root, newenv, body);
+}
+
 static Obj *logic_tail(void *root, Obj **env, Obj **args, bool is_and, Obj **settled) {
     if (*args == Nil) {
         *settled = is_and ? True : Nil;
@@ -1917,37 +1107,11 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
                     break;
                 }
                 if ((*fn)->fn == prim_apply) {
-                    // (apply f args). Both are evaluated here rather than inside the
-                    // primitive so that a call to a function can be taken over by this
-                    // loop, exactly as a call written out is. Without this a loop
-                    // written through `apply` would grow the stack where the same loop
-                    // written directly does not, which is a difference no one would
-                    // predict from the outside.
-                    if (length(*args) != 2)
-                        error("Malformed apply");
-                    *params = (*args)->cdr->car;
-                    *args = (*args)->car;
-                    *fn = eval(root, cenv, args);
-                    *args = eval(root, cenv, params);
-                    if (!is_list(*args))
-                        error("apply expects a list of arguments");
-
-                    // A primitive computes its own value and there is no tail to take
-                    // over, so it is called and its result returned.
-                    if ((*fn)->type == TPRIMITIVE)
-                        return apply_primitive(root, cenv, fn, args);
-                    if ((*fn)->type != TFUNCTION)
-                        error("The head of a list must be a function");
-
-                    // The same as the call below, with eval_list left out: the
-                    // arguments are values already.
-                    *params = (*fn)->params;
-                    *newenv = (*fn)->env;
-                    *newenv = push_env(root, newenv, params, args);
-                    *body = (*fn)->body;
-                    if (*body == Nil)
-                        return Nil;
-                    *cur = eval_but_last(root, newenv, body);
+                    Obj *settled = NULL;
+                    Obj *tail = apply_tail(root, cenv, args, newenv, &settled);
+                    if (!tail)
+                        return settled;
+                    *cur = tail;
                     *cenv = *newenv;
                     break;
                 }
@@ -2051,7 +1215,7 @@ static Obj *prim_setq(void *root, Obj **env, Obj **list) {
     DEFINE2(bind, value);
     *bind = find(env, (*list)->car);
     if (!*bind)
-        error("Unbound variable %s", (*list)->car->name);
+        error("Undefined symbol: %s", (*list)->car->name);
     if ((*list)->car->constant)
         error("Cannot change constant %s", (*list)->car->name);
     *value = (*list)->cdr->car;
@@ -2060,6 +1224,12 @@ static Obj *prim_setq(void *root, Obj **env, Obj **list) {
     return *value;
 }
 
+// A quoted literal is the very structure the reader built, and these change it in
+// place. (defun f () '(1 2 3)) followed by (setcar (f) 99) leaves f returning (99 2 3)
+// for good -- the function's own source has been edited. That is how this family
+// behaves and it is not a bug, but nothing about the spelling warns you, so: copy
+// before mutating anything you did not cons yourself.
+//
 // (setcar <cell> expr)
 static Obj *prim_setcar(void *root, Obj **env, Obj **list) {
     DEFINE1(args);
@@ -2125,13 +1295,36 @@ static Obj *prim_gensym(void *root, Obj **env, Obj **list) {
   return make_symbol(root, buf);
 }
 
+// Arithmetic that refuses to be quietly wrong.
+//
+// These used to overflow and carry on, which on a device means a sensor total or a
+// timestamp silently becoming a different number. The check that did exist could not
+// work: it multiplied first and divided back to see whether it had overflowed, and
+// signed overflow is undefined, so the compiler was free to assume it had not happened
+// and delete the test -- which it did at every optimisation level above -O0, meaning
+// the check was present in no build that ever shipped.
+//
+// The builtins do the arithmetic and report the overflow without ever producing the
+// undefined result. Available on all three toolchains this is built with.
+#define ARITH_OP(name, builtin, what)                            \
+    static int name(int a, int b) {                              \
+        int r;                                                   \
+        if (builtin(a, b, &r))                                   \
+            error("Integer overflow in " what);                  \
+        return r;                                                \
+    }
+
+ARITH_OP(add_checked, __builtin_add_overflow, "+")
+ARITH_OP(sub_checked, __builtin_sub_overflow, "-")
+ARITH_OP(mul_checked, __builtin_mul_overflow, "*")
+
 // (+ <integer> ...)
 static Obj *prim_plus(void *root, Obj **env, Obj **list) {
     int sum = 0;
     for (Obj *args = eval_list(root, env, list); args != Nil; args = args->cdr) {
         if (args->car->type != TINT)
             error("+ takes only numbers");
-        sum += args->car->value;
+        sum = add_checked(sum, args->car->value);
     }
     return make_int(root, sum);
 }
@@ -2148,10 +1341,10 @@ static Obj *prim_minus(void *root, Obj **env, Obj **list) {
         if (p->car->type != TINT)
             error("- takes only numbers");
     if (args->cdr == Nil)
-        return make_int(root, -args->car->value);
+        return make_int(root, sub_checked(0, args->car->value));
     int r = args->car->value;
     for (Obj *p = args->cdr; p != Nil; p = p->cdr)
-        r -= p->car->value;
+        r = sub_checked(r, p->car->value);
     return make_int(root, r);
 }
 
@@ -2159,14 +1352,18 @@ static Obj *prim_minus(void *root, Obj **env, Obj **list) {
 static Obj *prim_modulo(void *root, Obj **env, Obj **list) {
     Obj *args = eval_list(root, env, list);
     if (length(args) != 2)
-        error("Malformed MODULO");
+        error("Malformed %%");
     Obj *x = args->car;
     Obj *y = args->cdr->car;
     if (x->type != TINT || y->type != TINT)
-        error("MODULO takes only numbers");
+        error("%% takes only numbers");
 
     if (y->value == 0)
         error("Division by zero");
+    // The remainder of the one division that overflows. Mathematically zero, but the
+    // instruction traps on some targets, so it is answered rather than computed.
+    if (x->value == INT_MIN && y->value == -1)
+        return make_int(root, 0);
 
     return make_int(root, x->value % y->value);
 }
@@ -2193,21 +1390,21 @@ static Obj *prim_div(void *root, Obj **env, Obj **list) {
     if (args->car->value == 0)
         return make_int(root, 0);
 
-    float r = args->car->value;
-    for (Obj *p = args->cdr; p != Nil; p = p->cdr)
-        r /= (float)p->car->value;
+    // In integers. This used to divide in a float, whose 24 bit mantissa cannot hold a
+    // 32 bit integer, so (/ 100000000 3) came out as 33333334 -- and on a chip without
+    // a floating point unit it was software arithmetic as well. Truncates towards zero,
+    // as `%` does, so (/ x y) and (% x y) agree about which way the quotient went.
+    int r = args->car->value;
+    for (Obj *p = args->cdr; p != Nil; p = p->cdr) {
+        // The one division that overflows: INT_MIN / -1 has no positive counterpart.
+        if (r == INT_MIN && p->car->value == -1)
+            error("Integer overflow in /");
+        r /= p->car->value;
+    }
 
     return make_int(root, r);
 }
 
-static bool mul_with_overflow_check(int a, int b, int* res) {
-    const int r = a * b;
-    if (a != 0 && r / a != b)
-        return false;
-
-    *res = r;
-    return true;
-}
 
 // (* <integer> <integer> ...)
 static Obj *prim_mul(void *root, Obj **env, Obj **list) {
@@ -2229,11 +1426,7 @@ static Obj *prim_mul(void *root, Obj **env, Obj **list) {
 
     int r = args->car->value;
     for (Obj *p = args->cdr; p != Nil; p = p->cdr)
-    {
-        const bool is_overflow = ! mul_with_overflow_check(r, p->car->value, &r);
-        if (is_overflow)
-            error("Multiplication overflow");
-    }
+        r = mul_checked(r, p->car->value);
 
     return make_int(root, r);
 }
@@ -2671,7 +1864,7 @@ Obj *get_variable(void *root, Obj **env, const char *name) {
     *sym = intern(root, name);
     *bind = find(env, *sym);
     if (!*bind)
-        error("Unbound variable %s", name);
+        error("Undefined symbol: %s", name);
 
     return *bind;
 }

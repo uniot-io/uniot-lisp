@@ -1,6 +1,6 @@
 CFLAGS=-std=gnu99 -g -O2 -Wall -I src
 
-.PHONY: bench clean test test-32 test-gc test-mark-sweep test-repl test-wasm
+.PHONY: bench clean test test-32 test-gc test-mark-sweep test-repl test-san test-wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -59,6 +59,7 @@ clean:
 	rm -f repl32
 	rm -f repl32-copying
 	rm -f repl32-mark-sweep
+	rm -f repl-san
 	rm -f build/*
 
 test: repl
@@ -68,6 +69,27 @@ test: repl
 # turns itself off when the input is not a terminal.
 test-repl: repl
 	@python3 ./test_repl.py ./repl
+
+# The suite under AddressSanitizer and UndefinedBehaviorSanitizer. UBSan is the one
+# that matters here: the arithmetic used to overflow, which is undefined, and the check
+# that was supposed to catch it multiplied first and divided back to see -- so the
+# compiler was entitled to assume it had not happened and delete the test, which it did
+# at every optimisation level above -O0. UBSan reports it where -Wall cannot.
+#
+# The eval stack budget is raised because ASan's redzones make every C frame larger, so
+# the two tests that pin it to an ESP8266's 2048 bytes would fail for the wrong reason.
+repl-san: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+	$(CC) -std=gnu99 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+		-I src -D MINILISP_GC_DEBUG=1 -o $@ repl.c line_edit.c src/libminilisp.c
+
+test-san: repl-san
+	@MINILISP_SANITIZED=1 MINILISP_MAX_EVAL_STACK=1048576 REPL=./repl-san ./test.sh
+	@for f in examples/*.lisp; do \
+		MINILISP_MAX_EVAL_STACK=1048576 ./repl-san < $$f > /dev/null 2>/tmp/.san.$$$$ || true; \
+		if grep -q "runtime error\|AddressSanitizer" /tmp/.san.$$$$; then \
+			echo "$$f:"; cat /tmp/.san.$$$$; fi; rm -f /tmp/.san.$$$$; \
+	done
+	@echo "no sanitizer diagnostics"
 
 # A 32-bit host build, which is the only way this suite can run against the object layout
 # the devices actually use. A pointer is four bytes there, so the header is four and not

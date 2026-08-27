@@ -43,6 +43,27 @@ function run() {
 # seconds in the slowest configuration, and the matrix runs the suite five times. They
 # test the counters, not the collector, so they are run once, plainly, and skipped where
 # the collector is the thing under test.
+# Tests that pin the eval stack to a byte figure measure how much C stack a level of
+# evaluation costs. A sanitizer build changes that -- redzones make every frame larger --
+# so those tests cannot mean anything under it and are skipped rather than retuned to a
+# number that describes nothing. Everything else still runs, which is the point.
+STACK_BUDGET_OK=1
+if [ -n "$MINILISP_SANITIZED" ]; then
+  STACK_BUDGET_OK=
+fi
+
+# Runs a test that pins the eval stack budget. $1 is the budget; the rest is a `run`.
+function run_stack() {
+  if [ -z "$STACK_BUDGET_OK" ]; then return 0; fi
+  local budget=$1; shift
+  MINILISP_MAX_EVAL_STACK=$budget run "$@"
+}
+
+function run_error_stack() {
+  if [ -z "$STACK_BUDGET_OK" ]; then return 0; fi
+  run_error "$@"
+}
+
 SLOW_OK=1
 if [ -n "$MINILISP_VERIFY_GC" ] || [ -n "$MINILISP_ALWAYS_GC" ]; then
   SLOW_OK=
@@ -194,9 +215,9 @@ run or-short-circuits \#t '(or #t (/ 1 0))'
 run and-guards-a-list '()' '(and (consp ()) (car ()))'
 
 # The last operand is a tail position, like the last form of a body.
-MINILISP_MAX_EVAL_STACK=4096 run and-tail-position 0 \
+run_stack 4096 and-tail-position 0 \
   '(defun lp (n) (and #t (if (eql n 0) 0 (lp (+ n -1))))) (lp 1000)'
-MINILISP_MAX_EVAL_STACK=4096 run or-tail-position 0 \
+run_stack 4096 or-tail-position 0 \
   '(defun lp (n) (or () (if (eql n 0) 0 (lp (+ n -1))))) (lp 1000)'
 
 # Numeric comparisons
@@ -341,7 +362,7 @@ run progn-in-a-branch 42 '(if #t (progn 1 42) 0)'
 
 # The last form of a progn is a tail position, like the last form of a body. The budget
 # here is a fraction of what a thousand frames would need.
-MINILISP_MAX_EVAL_STACK=4096 run progn-tail-position 0 \
+run_stack 4096 progn-tail-position 0 \
   '(defun lp (n) (progn 1 (if (eql n 0) 0 (lp (+ n -1))))) (lp 1000)'
 
 # Type predicates. Without these nothing could ask what it was holding, and `=` raises on
@@ -363,19 +384,19 @@ run setcdr '(1 . 9)' '(define p (cons 1 2)) (setcdr p 9)'
 # A call in tail position must not grow the stack. The budget here is a fraction of what
 # a thousand nested frames would need, so this fails the moment a tail position stops
 # being one -- which is exactly what happened when `if` still evaluated its own branch.
-MINILISP_MAX_EVAL_STACK=4096 run tail-calls 0 \
+run_stack 4096 tail-calls 0 \
   '(defun lp (n) (if (= n 0) 0 (lp (+ n -1)))) (lp 1000)'
 
 # The last form of a multi-form else is a tail position too.
-MINILISP_MAX_EVAL_STACK=4096 run tail-calls-in-else 0 \
+run_stack 4096 tail-calls-in-else 0 \
   '(defun lp (n) (if (= n 0) 0 (print n) (lp (+ n -1)))) (lp 300)'
 
 # The last form of a function body, with earlier forms evaluated for effect.
-MINILISP_MAX_EVAL_STACK=4096 run tail-calls-in-body 0 \
+run_stack 4096 tail-calls-in-body 0 \
   '(defun lp (n) (setq n (+ n -1)) (if (= n 0) 0 (lp n))) (lp 500)'
 
 # Recursion that is not in tail position still has to be refused: the frames are real.
-run_error "non-tail recursion still bounded" "Recursion too deep" \
+run_error_stack "non-tail recursion still bounded" "Recursion too deep" \
   '(defun d (n) (if (= n 0) 0 (+ 1 (d (+ n -1))))) (d 1000)' 4096
 
 # A tail call that never returns is a loop, and is bounded like one. Before tail calls
@@ -448,6 +469,33 @@ run_error "duplicate rest parameter" "Duplicate parameter: a" '(defun f (a . a) 
 run_error "duplicate parameter in a macro" "Duplicate parameter: x" '(defmacro m (x x) x)'
 run distinct-parameters 3 '(defun f (a b) (+ a b)) (f 1 2)'
 
+# One name for one condition. A name that is not bound reported "Undefined symbol: x"
+# from eval and "Unbound variable x" from setq -- different words and different
+# punctuation for the same thing.
+run_error "undefined symbol" "Undefined symbol: nope" 'nope'
+run_error "undefined symbol from setq" "Undefined symbol: nope" '(setq nope 1)'
+run_error "undefined symbol as a head" "Undefined symbol: nope" '(nope 1)'
+
+# Arithmetic that refuses to be quietly wrong. The overflow check that was here could
+# not work -- it multiplied first and divided back, and signed overflow is undefined, so
+# every build above -O0 deleted the test.
+run_error "add overflows" "Integer overflow in +" '(+ 2000000000 2000000000)'
+run_error "subtract overflows" "Integer overflow in -" '(- -2000000000 2000000000)'
+run_error "multiply overflows" "Integer overflow in *" '(* 2000000000 2)'
+# INT_MIN is reachable by arithmetic but cannot be written as a literal, and it is the
+# one value whose negation, and whose division by -1, has no positive counterpart.
+run int-min -2147483648 '(- (- 0 2147483647) 1)'
+run_error "negate overflows" "Integer overflow in -" '(- (- (- 0 2147483647) 1))'
+run_error "divide overflows" "Integer overflow in /" '(/ (- (- 0 2147483647) 1) -1)'
+run modulo-of-int-min 0 '(% (- (- 0 2147483647) 1) -1)'
+run_error "literal too large" "Integer literal is too large" '2147483648'
+
+# Division in integers. In a float, whose mantissa is 24 bits, these were all wrong.
+run divide-exactly 33333333 '(/ 100000000 3)'
+run divide-exactly-2 123456789 '(/ 123456789 1 1)'
+run divide-truncates-toward-zero -3 '(/ -7 2)'
+run divide-agrees-with-modulo -1 '(% -7 2)'
+
 # apply: calling a function with a list of arguments worked out at run time. The
 # arguments are already values, so a primitive -- which evaluates what it is handed --
 # has to be given them quoted, and the order has to survive that.
@@ -467,9 +515,9 @@ run apply-forwards "(got 1 2)" \
 # The call apply makes is in tail position, like a call written out. Without that a
 # loop written through it grows the stack where the same loop written directly does
 # not, which is a difference nobody would predict from the outside.
-MINILISP_MAX_EVAL_STACK=2048 run apply-is-a-tail-call done \
+run_stack 2048 apply-is-a-tail-call done \
   "(defun loop (n) (if (= n 0) 'done (apply loop (list (- n 1))))) (loop 500)"
-MINILISP_MAX_EVAL_STACK=2048 run apply-mutual-tail done \
+run_stack 2048 apply-mutual-tail done \
   "(defun a (n) (if (= n 0) 'done (apply b (list (- n 1))))) (defun b (n) (apply a (list n))) (a 300)"
 run_error "runaway apply" "without returning" '(defun r (n) (apply r (list (+ n 1)))) (r 0)'
 # An alias is the same primitive and keeps the treatment; a rebinding does not.
@@ -504,7 +552,7 @@ run redefine-function 2 '(defun f (x) 1) (defun f (x) 2) (f 0)'
 # stack running out. The recursion is deliberately not in tail position -- wrapped in an
 # addition -- because a tail call costs no stack at all and would leave this passing for
 # the wrong reason.
-run_error "eval stack guard" "Recursion too deep" \
+run_error_stack "eval stack guard" "Recursion too deep" \
   '(defun f (n) (if (= n 0) 0 (+ 1 (f (+ n -1))))) (f 50)' 4096
 
 if [ "$FAILURES" -ne 0 ]; then
