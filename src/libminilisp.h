@@ -126,6 +126,23 @@ extern "C" {
     Obj **var3 = (Obj **)(root_ADD_ROOT_ + 3); \
     Obj **var4 = (Obj **)(root_ADD_ROOT_ + 4)
 
+#define DEFINE5(var1, var2, var3, var4, var5)  \
+    ADD_ROOT(5);                               \
+    Obj **var1 = (Obj **)(root_ADD_ROOT_ + 1); \
+    Obj **var2 = (Obj **)(root_ADD_ROOT_ + 2); \
+    Obj **var3 = (Obj **)(root_ADD_ROOT_ + 3); \
+    Obj **var4 = (Obj **)(root_ADD_ROOT_ + 4); \
+    Obj **var5 = (Obj **)(root_ADD_ROOT_ + 5)
+
+#define DEFINE6(var1, var2, var3, var4, var5, var6) \
+    ADD_ROOT(6);                               \
+    Obj **var1 = (Obj **)(root_ADD_ROOT_ + 1); \
+    Obj **var2 = (Obj **)(root_ADD_ROOT_ + 2); \
+    Obj **var3 = (Obj **)(root_ADD_ROOT_ + 3); \
+    Obj **var4 = (Obj **)(root_ADD_ROOT_ + 4); \
+    Obj **var5 = (Obj **)(root_ADD_ROOT_ + 5); \
+    Obj **var6 = (Obj **)(root_ADD_ROOT_ + 6)
+
 // Note that ADD_ROOT reassigns `root` to the frame it declares, so none of these may be
 // used inside a loop body: a second pass would link the frame to itself and the
 // collector's walk of the root chain would never terminate. Declare them before the

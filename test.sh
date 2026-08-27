@@ -448,6 +448,42 @@ run_error "duplicate rest parameter" "Duplicate parameter: a" '(defun f (a . a) 
 run_error "duplicate parameter in a macro" "Duplicate parameter: x" '(defmacro m (x x) x)'
 run distinct-parameters 3 '(defun f (a b) (+ a b)) (f 1 2)'
 
+# apply: calling a function with a list of arguments worked out at run time. The
+# arguments are already values, so a primitive -- which evaluates what it is handed --
+# has to be given them quoted, and the order has to survive that.
+run apply-primitive 6 '(apply + (list 1 2 3))'
+run apply-order 77 '(apply - (list 100 20 3))'
+run apply-unevaluated 1 '(apply car (list (list 1 2)))'
+run apply-symbols "(on off)" "(apply list (list 'on 'off))"
+run apply-function 42 '(defun f (a b) (* a b)) (apply f (list 6 7))'
+run apply-closure 15 '(define g ((lambda (n) (lambda (x) (+ n x))) 10)) (apply g (list 5))'
+run apply-no-args 42 '(defun z () 42) (apply z ())'
+run apply-rest-params "(1 (2 3))" '(defun v (a . r) (list a r)) (apply v (list 1 2 3))'
+# The reason it exists: a rest parameter can collect arguments but nothing else can
+# pass them on.
+run apply-forwards "(got 1 2)" \
+  "(defun raw (a b) (list 'got a b)) (defun traced args (apply raw args)) (traced 1 2)"
+
+# The call apply makes is in tail position, like a call written out. Without that a
+# loop written through it grows the stack where the same loop written directly does
+# not, which is a difference nobody would predict from the outside.
+MINILISP_MAX_EVAL_STACK=2048 run apply-is-a-tail-call done \
+  "(defun loop (n) (if (= n 0) 'done (apply loop (list (- n 1))))) (loop 500)"
+MINILISP_MAX_EVAL_STACK=2048 run apply-mutual-tail done \
+  "(defun a (n) (if (= n 0) 'done (apply b (list (- n 1))))) (defun b (n) (apply a (list n))) (a 300)"
+run_error "runaway apply" "without returning" '(defun r (n) (apply r (list (+ n 1)))) (r 0)'
+# An alias is the same primitive and keeps the treatment; a rebinding does not.
+run apply-alias 6 '(define ap apply) (ap + (list 1 2 3))'
+run apply-rebound mine "(defun apply (f a) 'mine) (apply + (list 1))"
+# Reached as an ordinary primitive rather than through eval's shortcut.
+run apply-applied 6 '(apply apply (list + (list 1 2 3)))'
+
+run_error "apply arity" "Malformed apply" '(apply +)'
+run_error "apply needs a list" "expects a list of arguments" '(apply + 5)'
+run_error "apply of a non-function" "head of a list must be a function" '(apply 5 (list 1))'
+run_error "apply of a macro" "head of a list must be a function" '(defmacro m (a) a) (apply m (list 1))'
+run_error "apply checks arity" "too many arguments" '(defun f (a) a) (apply f (list 1 2))'
+
 # A macro object in head position, which a form built at run time can produce. It used
 # to report an internal bug rather than the ordinary complaint.
 run_error "macro object as a head" "head of a list must be a function" \

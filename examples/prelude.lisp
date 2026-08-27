@@ -73,28 +73,44 @@
 
 ;;; Calling a function whose arguments are a list
 ;;; --------------------------------------------------------------------------------
-;; `apply` is not built in, and this is it. The arguments are already values, so each
-;; is wrapped in a quote to stop `eval` evaluating it a second time -- without that,
-;; (apply car (list (list 1 2))) would try to call 1.
+;; `apply` is built in, unlike everything else here. `%apply` below is the same thing
+;; written in the language, kept because what it has to do is worth seeing: a primitive
+;; is handed its arguments unevaluated and evaluates them itself, so arguments that are
+;; already values have to be quoted before it sees them. Without that,
+;; (%apply car (list (list 1 2))) would evaluate (1 2) and try to call 1.
 (defun quoted (x) (list 'quote x))
-(defun apply (f args) (eval (cons f (map quoted args))))
+(defun %apply (f args) (eval (cons f (map quoted args))))
 
+(%apply + (list 1 2 3))                 ; 6
+(%apply car (list (list 1 2)))          ; 1
+(%apply cons (list 'a 'b))              ; (a . b)
+(%apply list (list 'on 'off))           ; (on off)
+
+;; The built-in agrees with it, and is the one to use. It costs about a tenth of the
+;; garbage -- it binds a function's arguments directly instead of building a form to
+;; evaluate -- and a call it makes is in tail position, so a loop written through it
+;; does not grow the stack. `%apply` is neither of those things.
 (apply + (list 1 2 3))                  ; 6
-(apply car (list (list 1 2)))           ; 1
-(apply cons (list 'a 'b))               ; (a . b)
+(apply list (list 'on 'off))            ; (on off)
 
-;; What it is actually for. A rest parameter lets a function accept any number of
-;; arguments, but nothing else lets it pass them on, so a wrapper cannot exist without
-;; this. Summing a list is `reduce`; forwarding is `apply`.
+;; What it is for. A rest parameter lets a function accept any number of arguments, but
+;; nothing else lets it pass them on, so a wrapper cannot exist without it. Summing a
+;; list is `reduce`; forwarding is `apply`.
 (defun raw (a b) (list 'got a b))
 (defun traced args (apply raw args))
 
 (traced 1 2)                            ; (got 1 2)
 
-;; Two things to know before using it on a device. It builds a form and evaluates it,
-;; which allocates: about 1900 bytes for three arguments where calling directly costs
-;; 216. And the call it makes is not in tail position, so a loop written through
-;; `apply` consumes stack where the same loop written directly does not.
+;; Five hundred calls deep, in the stack an ESP8266 gives a script.
+(defun countdown (n) (if (= n 0) 'done (apply countdown (list (- n 1)))))
+(countdown 500)                         ; done
+
+;; The version to avoid, which you will arrive at on your own if you reach for `eval`.
+;; It works for numbers and for nothing else, so it passes every test written with
+;; numbers and fails on the first symbol -- and half the device primitives take symbols.
+(defun use (f x) (eval (cons f x)))
+(use + (list 1 2 3))                    ; 6
+;; (use list (list 'on 'off))           ; Undefined symbol: on
 
 ;;; Looking things up
 ;;; --------------------------------------------------------------------------------

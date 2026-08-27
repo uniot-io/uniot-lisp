@@ -1622,6 +1622,35 @@ static bool is_list(Obj *obj) {
     return obj == Nil || obj->type == TCELL;
 }
 
+// Hands a primitive a list of arguments that are already values. A primitive is given
+// its arguments unevaluated and calls eval_list on them itself, which is right when it
+// stands in a form a user wrote and wrong here, so each one is wrapped in a quote first.
+// Two cells per argument, and the only way short of a second entry point into every
+// primitive.
+//
+// `rest` walks the list from a root rather than from a local Obj *. cons() below can
+// collect, and under the copying collector every object moves when it does, so a bare
+// pointer held across it would be left pointing at where the cell used to be.
+static Obj *apply_primitive(void *root, Obj **env, Obj **fn, Obj **args) {
+    DEFINE4(rest, quoted, cell, qsym);
+    // Interned once, not once per argument: it walks the symbol table, and the symbol it
+    // returns is on the heap and moves like everything else.
+    *qsym = intern(root, "quote");
+    *quoted = Nil;
+    *rest = *args;
+    while (*rest != Nil) {
+        *cell = (*rest)->car;
+        *cell = cons(root, cell, &Nil);
+        *cell = cons(root, qsym, cell);
+        *quoted = cons(root, cell, quoted);
+        *rest = (*rest)->cdr;
+    }
+    // Built back to front and reversed, which is destructive and allocates nothing,
+    // rather than kept in order with a tail pointer -- one less root to hold.
+    *quoted = reverse(*quoted);
+    return (*fn)->fn(root, env, quoted);
+}
+
 static Obj *apply_func(void *root, Obj **env, Obj **fn, Obj **args) {
     DEFINE3(params, newenv, body);
     *params = (*fn)->params;
@@ -1717,6 +1746,9 @@ static Obj *prim_if(void *root, Obj **env, Obj **list);
 static Obj *prim_progn(void *root, Obj **env, Obj **list);
 static Obj *prim_and(void *root, Obj **env, Obj **list);
 static Obj *prim_or(void *root, Obj **env, Obj **list);
+
+// Also recognised, for the same reason: the call it makes lands in tail position.
+static Obj *prim_apply(void *root, Obj **env, Obj **list);
 
 // Evaluates the operands of `and` or `or` until the answer is decided. Returns the
 // operand left over for the caller to evaluate in tail position, or NULL when the answer
@@ -1882,6 +1914,41 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
                     if (*args == Nil)
                         return Nil;
                     *cur = eval_but_last(root, cenv, args);
+                    break;
+                }
+                if ((*fn)->fn == prim_apply) {
+                    // (apply f args). Both are evaluated here rather than inside the
+                    // primitive so that a call to a function can be taken over by this
+                    // loop, exactly as a call written out is. Without this a loop
+                    // written through `apply` would grow the stack where the same loop
+                    // written directly does not, which is a difference no one would
+                    // predict from the outside.
+                    if (length(*args) != 2)
+                        error("Malformed apply");
+                    *params = (*args)->cdr->car;
+                    *args = (*args)->car;
+                    *fn = eval(root, cenv, args);
+                    *args = eval(root, cenv, params);
+                    if (!is_list(*args))
+                        error("apply expects a list of arguments");
+
+                    // A primitive computes its own value and there is no tail to take
+                    // over, so it is called and its result returned.
+                    if ((*fn)->type == TPRIMITIVE)
+                        return apply_primitive(root, cenv, fn, args);
+                    if ((*fn)->type != TFUNCTION)
+                        error("The head of a list must be a function");
+
+                    // The same as the call below, with eval_list left out: the
+                    // arguments are values already.
+                    *params = (*fn)->params;
+                    *newenv = (*fn)->env;
+                    *newenv = push_env(root, newenv, params, args);
+                    *body = (*fn)->body;
+                    if (*body == Nil)
+                        return Nil;
+                    *cur = eval_but_last(root, newenv, body);
+                    *cenv = *newenv;
                     break;
                 }
                 if ((*fn)->fn == prim_and || (*fn)->fn == prim_or) {
@@ -2364,6 +2431,39 @@ static Obj *prim_print(void *root, Obj **env, Obj **list) {
     return *tmp;
 }
 
+// (apply fn args) -- calls fn with the elements of the list `args` as its arguments.
+//
+// The awkward half is a primitive. A primitive is handed its arguments unevaluated and
+// calls eval_list on them itself, which is right when it stands in a form a user wrote
+// and wrong here, where they are already values: (apply car (list (list 1 2))) would
+// evaluate (1 2) and try to call 1. So each one is wrapped in a quote on the way in.
+// That costs two cells per argument, and it is the only way short of a second entry
+// point into every primitive.
+//
+// A function needs none of that. apply_func binds the values it is given and evaluates
+// the body, which is what eval does for a call once eval_list has run -- so this is the
+// same path with the evaluation left out, and it allocates nothing but the frame.
+static Obj *prim_apply(void *root, Obj **env, Obj **list) {
+    if (length(*list) != 2)
+        error("Malformed apply");
+    DEFINE2(fn, args);
+    *fn = (*list)->car;
+    *fn = eval(root, env, fn);
+    *args = (*list)->cdr->car;
+    *args = eval(root, env, args);
+    if (!is_list(*args))
+        error("apply expects a list of arguments");
+
+    // A function needs no quoting. apply_func binds the values it is given and
+    // evaluates the body, which is what eval does for a call once eval_list has run --
+    // so this is the same path with the evaluation left out.
+    if ((*fn)->type == TFUNCTION)
+        return apply_func(root, env, fn, args);
+    if ((*fn)->type != TPRIMITIVE)
+        error("The head of a list must be a function");
+    return apply_primitive(root, env, fn, args);
+}
+
 // (eval 'expr)
 static Obj *prim_eval(void *root, Obj **env, Obj **list) {
     if (length(*list) != 1)
@@ -2622,6 +2722,7 @@ void define_primitives(void *root, Obj **env) {
     // Implemented to reduce code.
     // Most of these functions can be implemented using previously declared functions.
     add_primitive(root, env, "eval", prim_eval);
+    add_primitive(root, env, "apply", prim_apply);
     add_primitive(root, env, "list", prim_list);
     add_primitive(root, env, "not", prim_not);
     add_primitive(root, env, "and", prim_and);
