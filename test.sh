@@ -496,6 +496,17 @@ run divide-exactly-2 123456789 '(/ 123456789 1 1)'
 run divide-truncates-toward-zero -3 '(/ -7 2)'
 run divide-agrees-with-modulo -1 '(% -7 2)'
 
+# A cycle can be built with setcdr, and a walk of one has no end. The printer runs the
+# value of every top-level form, so this is what a device hangs on.
+run_error "length of a circular list" "length takes a list" \
+  '(define x (list 1 2)) (setcdr x x) (length x)'
+run_after_error circular-print-terminates 0 \
+  '(define x (list 1 2)) (setcdr x x) x
+0'
+
+# gensym takes nothing, and said nothing when given something.
+run_error "gensym arity" "Malformed gensym" '(gensym 1)'
+
 # apply: calling a function with a list of arguments worked out at run time. The
 # arguments are already values, so a primitive -- which evaluates what it is handed --
 # has to be given them quoted, and the order has to survive that.

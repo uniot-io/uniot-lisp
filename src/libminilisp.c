@@ -670,6 +670,13 @@ int print_to_buf(char *buf, size_t size, int pos, Obj *obj) {
                 pos = print_to_buf(buf, size, pos, obj->cdr);
                 break;
             }
+            // Nothing more will fit, so there is nothing to gain by walking further --
+            // and a list can be made to point at itself, with (setcdr x x), after which
+            // this walk has no end. The output was truncated either way; stopping here
+            // is what keeps a cycle from hanging the device. The recursion through `car`
+            // above is bounded separately, by the stack budget.
+            if (buf && size > 0 && (size_t)pos >= size - 1)
+                break;
             pos = printf_to_handler(buf, size, pos, " ");
             obj = obj->cdr;
         }
@@ -708,11 +715,17 @@ void print(Obj *obj) {
 }
 
 // Returns the length of the given list. -1 if it's not a proper list.
+//
+// A list can be made to point at itself with (setcdr x x), and a walk of one has no end.
+// No acyclic list can hold more cells than the heap does, so a count past that says the
+// list is circular -- reported as improper, which is what a caller already handles.
 int length(Obj *list) {
-    int len = 0;
+    const size_t limit = MEMORY_SIZE / sizeof(Obj);
+    size_t len = 0;
     for (; list->type == TCELL; list = list->cdr)
-        len++;
-    return list == Nil ? len : -1;
+        if (++len > limit)
+            return -1;
+    return list == Nil ? (int)len : -1;
 }
 
 //======================================================================
@@ -1289,6 +1302,8 @@ static Obj *prim_while(void *root, Obj **env, Obj **list) {
 
 // (gensym)
 static Obj *prim_gensym(void *root, Obj **env, Obj **list) {
+  if (*list != Nil)
+      error("Malformed gensym");
   static int count = 0;
   char buf[10];
   snprintf(buf, sizeof(buf), "G__%d", count++);
