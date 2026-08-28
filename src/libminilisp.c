@@ -765,6 +765,12 @@ static Obj *push_env(void *root, Obj **env, Obj **vars, Obj **vals) {
 
 // Evaluates the list elements from head and returns the last return value.
 static Obj *progn(void *root, Obj **env, Obj **list) {
+    // An empty sequence is (), not whatever the loop left behind. ADD_ROOT fills its
+    // slots with NULL, so without this the loop running zero times returns a null
+    // pointer into the evaluator -- which is why a function was not allowed an empty
+    // body until this was here to make one safe.
+    if (*list == Nil)
+        return Nil;
     DEFINE2(lp, r);
     for (*lp = *list; *lp != Nil; *lp = (*lp)->cdr) {
         *r = (*lp)->car;
@@ -1519,7 +1525,10 @@ static Obj *handle_function(void *root, Obj **env, Obj **list, int type) {
     // bare symbol that takes all of them. The last is the same mechanism as the second
     // with nothing required first, and push_env already binds it: a symbol is not a cell,
     // so it falls past the loop to the line that binds whatever is left over.
-    if ((*list)->type != TCELL || (*list)->cdr->type != TCELL ||
+    // The body may be empty -- (lambda ()) is a function of no arguments returning (),
+    // as it is in the Lisp this imitates. The three places that evaluate a body already
+    // answer () for an empty one; this is what lets them.
+    if ((*list)->type != TCELL || !is_list((*list)->cdr) ||
         (!is_list((*list)->car) && (*list)->car->type != TSYMBOL))
         error("Malformed lambda");
     // Names must be distinct. Binding the same one twice is a typo every time -- the

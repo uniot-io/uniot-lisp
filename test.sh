@@ -560,6 +560,18 @@ run_error "macro object as a head" "head of a list must be a function" \
   '(defmacro m (a) a) (eval (cons m (list 1)))'
 run macro-is-a-value "#t" '(defmacro m (a) a) (eql m m)'
 
+# A function may have no body and answers () when called, as it does in the Lisp this
+# imitates. Three separate places evaluate a body -- eval's own call path, apply_tail,
+# and apply_func by way of progn -- and each had a guard for the empty case that could
+# not be reached until now, progn's being a null pointer rather than ().
+run empty-body-lambda "()" "((lambda ()))"
+run empty-body-defun "()" "(defun f ()) (f)"
+run empty-body-apply "()" "(apply (lambda ()) ())"
+run empty-body-macro "()" "(defmacro m ()) (m)"
+run empty-body-with-params "()" "(defun f (a b)) (f 1 2)"
+run empty-body-rest-params "()" "(defun f args) (f 1 2)"
+run_error "improper body tail" "Malformed lambda" "(lambda (x) . 5)"
+
 # A parameter that is not a symbol, in either position.
 run_error "non-symbol parameter" "must be a symbol" '(lambda (a 5) 1)'
 run_error "non-symbol rest parameter" "must be a symbol" '(lambda (a . 5) 1)'

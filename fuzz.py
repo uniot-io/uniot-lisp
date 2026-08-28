@@ -81,6 +81,8 @@ def expr(r, d, vars):
         v = f"c{r.randint(0, 9)}"
         return f"(((lambda ({v}) (lambda () {expr(r, d - 1, vars + [v])})) {e()}))"
     if k == 12:                                       # rest parameters
+        if r.random() < 0.2:                          # and the empty body, which reaches
+            return f"((lambda ()))"                   # three separate guards
         return f"((lambda args (length args)) {e()} {e()})"
     if k == 13:                                       # apply, the tail path
         return f"(apply {r.choice(['+', 'list', 'cons'])} (list {num(r)} {num(r)}))"
