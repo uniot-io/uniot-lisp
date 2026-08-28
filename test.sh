@@ -69,6 +69,17 @@ if [ -n "$MINILISP_VERIFY_GC" ] || [ -n "$MINILISP_ALWAYS_GC" ]; then
   SLOW_OK=
 fi
 
+# Tests that need more heap than a device has. The interpreters file is a stress test,
+# not a device script: it wants 14000 bytes at device object sizes, so the run that
+# pins the heap to what an ESP8266 ships with would fail it for the right reason and
+# the wrong purpose.
+function run_big() {
+  local need=$1; shift
+  local have=${MINILISP_HEAP_SIZE:-40000}
+  if [ "$have" -lt "$need" ]; then return 0; fi
+  run_slow "$@"
+}
+
 function run_slow() {
   if [ -z "$SLOW_OK" ]; then return 0; fi
   MINILISP_ALWAYS_GC= run "$@"
@@ -553,6 +564,13 @@ run macro-is-a-value "#t" '(defmacro m (a) a) (eql m m)'
 run_error "non-symbol parameter" "must be a symbol" '(lambda (a 5) 1)'
 run_error "non-symbol rest parameter" "must be a symbol" '(lambda (a . 5) 1)'
 run_error "non-list parameters" "Malformed lambda" '(lambda 5 1)'
+
+# examples/interpreters.lisp: the Z combinator, Church numerals, and this Lisp
+# interpreting itself. Deliberately atypical -- closures capturing closures, recursion
+# with no name to recurse through, environments built at run time, symbol identity
+# leaned on by an inner evaluator. It allocates heavily, which makes it a collector test
+# as much as an evaluator one.
+run_big 14000 interpreters "(720 144 3 3 5 49 120 15)" "$(cat examples/interpreters.lisp)"
 
 # Redefinition rebinds rather than raising, as it does everywhere else in this family.
 run redefine-value 2 '(define a 1) (define a 2) a'

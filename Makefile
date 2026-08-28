@@ -1,6 +1,6 @@
 CFLAGS=-std=gnu99 -g -O2 -Wall -I src
 
-.PHONY: bench clean test test-32 test-gc test-mark-sweep test-repl test-san test-wasm
+.PHONY: bench clean fuzz test test-32 test-gc test-mark-sweep test-repl test-san test-wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -64,6 +64,16 @@ clean:
 
 test: repl
 	@./test.sh
+
+# Differential fuzzing. There is no oracle for what a generated program should print,
+# and writing one would mean writing a second interpreter. What there is instead is four
+# builds that must agree -- two collectors, two word sizes, and a sanitizer build -- so a
+# program any two of them disagree on has found a bug with no expected answer written
+# down. Verified non-vacuous against a deliberately broken build.
+fuzz: repl-mark-sweep repl-copying repl32 repl-san
+	@python3 ./fuzz.py $(N)
+
+N ?= 300
 
 # Line editing, which the shell suite cannot reach: it pipes its input, and the editor
 # turns itself off when the input is not a terminal.
