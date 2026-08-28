@@ -101,6 +101,39 @@ extern "C" {
 #define LISP_INT_MIN INT32_MIN
 #define LISP_INT_FMT PRId32
 
+// Where the strings live.
+//
+// On an ESP8266 .rodata is placed in DRAM, so every message this library carries costs
+// RAM -- measured at 2096 bytes across 134 strings, of which the error and format
+// messages are 1743. PSTR puts a literal in a flash section instead, and vsnprintf_P
+// reads it back from there. Nothing else needs it: an ESP32 and an ESP32-C3 already
+// place .rodata in mapped flash, and a host has no such distinction.
+//
+// Applied through these rather than at the call sites, so that `error("...")` keeps
+// reading as an ordinary call and cannot be written the wrong way by accident. The
+// format string must be a literal, which every one of them is.
+#if defined(__ets__) || defined(ARDUINO_ARCH_ESP8266) || defined(ESP8266)
+// ESP8266: .rodata is linked into DRAM, so a literal costs RAM until it is moved.
+#include <sys/pgmspace.h>
+#define LISP_FMT(s) PSTR(s)
+#define LISP_VSNPRINTF vsnprintf_P
+#elif defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
+// ESP32 and ESP32-C3 link .rodata into mapped flash already, and their pgmspace defines
+// PSTR(s) as (s) and vsnprintf_P as vsnprintf. Naming them anyway costs nothing and puts
+// the intent in the code: a reader asking "where do the messages live on an ESP32?" gets
+// an answer here rather than having to know what the linker script does. It also means a
+// toolchain that stops placing them in flash is a definition to change, not a silent
+// regression. Bare ESP-IDF has no pgmspace and falls through below, which is correct for
+// the same reason.
+#include <pgmspace.h>
+#define LISP_FMT(s) PSTR(s)
+#define LISP_VSNPRINTF vsnprintf_P
+#else
+// A host, and WebAssembly: no such distinction to make.
+#define LISP_FMT(s) (s)
+#define LISP_VSNPRINTF vsnprintf
+#endif
+
 #define ROOT_END ((void *)-1)
 
 #define ADD_ROOT(size)                   \
@@ -466,7 +499,11 @@ struct Obj *make_env(void *root, Obj **vars, Obj **up);
 
 int length(Obj *list);
 
-void __attribute((noreturn)) error(const char *fmt, ...);
+void __attribute((noreturn)) lisp_error(const char *fmt, ...);
+
+// The format string goes to flash where the target keeps .rodata in RAM. A macro, so a
+// caller writes error("...") and gets it without knowing.
+#define error(fmt, ...) lisp_error(LISP_FMT(fmt), ##__VA_ARGS__)
 
 void define_constants(void *root, Obj **env);
 

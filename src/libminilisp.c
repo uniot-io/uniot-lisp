@@ -122,7 +122,7 @@ static int printf_to_handler(char *dest, size_t size, int pos, const char *fmt, 
         bool truncated = false;
         int n = 0;
         if (remaining > 0) {
-            n = vsnprintf(dest + pos, remaining, fmt, args);
+            n = LISP_VSNPRINTF(dest + pos, remaining, fmt, args);
             if (n < 0)
                 n = 0;
             truncated = ((size_t)n >= remaining);
@@ -143,7 +143,7 @@ static int printf_to_handler(char *dest, size_t size, int pos, const char *fmt, 
             written = (int)size - 1;
         }
     } else if (print_out) {
-        int n = vsnprintf(s_message_buf, sizeof(s_message_buf), fmt, args);
+        int n = LISP_VSNPRINTF(s_message_buf, sizeof(s_message_buf), fmt, args);
         if (n < 0)
             n = 0;
         if ((size_t)n > sizeof(s_message_buf) - 1)
@@ -162,7 +162,7 @@ static void vsprintf_error_to_handler(const char *fmt, va_list ap)
     if (print_err) {
         // Reachable from user code, e.g. error("Undefined symbol: %s", name) with a
         // name approaching SYMBOL_MAX_LEN.
-        int size = vsnprintf(s_message_buf, sizeof(s_message_buf), fmt, ap);
+        int size = LISP_VSNPRINTF(s_message_buf, sizeof(s_message_buf), fmt, ap);
         if (size < 0)
             size = 0;
         if ((size_t)size > sizeof(s_message_buf) - 1)
@@ -172,7 +172,7 @@ static void vsprintf_error_to_handler(const char *fmt, va_list ap)
 }
 // TODO: --------------------------------------------------------------------
 
-void __attribute((noreturn)) error(const char *fmt, ...) {
+void __attribute((noreturn)) lisp_error(const char *fmt, ...) {
     // Nothing to do for the loop counters. The tail-call count is a local and goes with
     // the frame; the loop count and depth are cleared where the next evaluation begins,
     // which is reached by exactly this jump. Clearing them here as well would be a
