@@ -23,16 +23,10 @@
             "emsdk",
             "build",
             ".pio",
-            "repl",
-            "repl-copying",
-            "repl-mark-sweep",
-            "repl-mark-sweep-small",
-            "repl32",
-            "repl32-copying",
-            "repl32-mark-sweep",
-            "repl-san",
-            "bench-copying",
-            "bench-mark-sweep"
+            "test",
+            "tools",
+            "wasm",
+            "examples"
         ]
     }
 }

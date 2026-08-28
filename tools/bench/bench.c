@@ -183,6 +183,11 @@ static uint64_t run_once(const Workload *w, bool *ok)
 // lisp_eval() installs an error handler, so a heap below it would abort the process
 // rather than raise. Measured rather than guessed, because it depends on the width of a
 // pointer and on how many primitives are defined.
+//
+// Returns 0 if the interpreter could not be created at all, which the caller has to
+// treat as fatal rather than as a number. Reporting failure as (size_t)-1 was worse than
+// useless: printed, it read as a four-billion-byte interpreter, and the caller's check
+// of `heap < setup_cost + 1024` wrapped to `heap < 1023` and stopped guarding anything.
 static size_t measure_setup_cost(void)
 {
   void *env_constructor[3];
@@ -192,9 +197,12 @@ static size_t measure_setup_cost(void)
   void *root = env_constructor;
   Obj **genv = (Obj **)(env_constructor + 1);
 
-  lisp_create(512 * 1024, 256 * 1024);
+  // Within LISP_MAX_HEAP, which lisp_create refuses to exceed. This asked for 512K and
+  // had been silently failing ever since that ceiling arrived with the smaller object
+  // header.
+  lisp_create(LISP_MAX_HEAP, 256 * 1024);
   if (!lisp_is_created())
-    return (size_t)-1;
+    return 0;
 
   *genv = make_env(root, &Nil, &Nil);
   define_constants(root, genv);
@@ -217,6 +225,11 @@ int main(int argc, char **argv)
   lisp_stats_clock = now_ns;
 
   const size_t setup_cost = measure_setup_cost();
+  if (setup_cost == 0)
+  {
+    fprintf(stderr, "could not create an interpreter to measure setup cost\n");
+    return 1;
+  }
   printf("-\tsetup_bytes\t%u\n", (unsigned)setup_cost);
   printf("-\tstrategy\t%s\n", STRATEGY);
 

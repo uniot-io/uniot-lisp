@@ -22,11 +22,11 @@ import sys
 import re
 
 BUILDS = {
-    "mark-sweep": "./repl-mark-sweep",
-    "copying": "./repl-copying",
+    "mark-sweep": "build/repl-mark-sweep",
+    "copying": "build/repl-copying",
 }
-SAN = "./repl-san"
-WORD32 = "./repl32"
+SAN = "build/repl-san"
+WORD32 = "build/repl32"
 
 HEAP = "60000"          # generous, so that memory exhaustion is not what differs
 STACK = "262144"

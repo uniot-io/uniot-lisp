@@ -1,6 +1,22 @@
+# Every build product goes to build/, which is the one directory `clean` removes and
+# the only one the release workflow reads. Sources live where they belong: the
+# interpreter in src/, the REPL and benchmarks under tools/, the WebAssembly target
+# in wasm/, the suites in test/.
+B = build
 CFLAGS=-std=gnu99 -g -O2 -Wall -I src
 
-.PHONY: bench clean fuzz test test-32 test-gc test-mark-sweep test-repl test-san test-wasm
+REPL_SRC  = tools/repl/repl.c tools/repl/line_edit.c
+REPL_DEPS = $(REPL_SRC) tools/repl/line_edit.h src/libminilisp.c src/libminilisp.h \
+            src/gc_copying.inc src/gc_marksweep.inc
+LIB       = src/libminilisp.c
+
+$(B):
+	@mkdir -p $(B)
+
+# `wasm` names both a target and a directory, so without this Make sees the directory,
+# decides the target is up to date and builds nothing.
+.PHONY: bench clean fuzz server test test-32 test-gc test-mark-sweep test-repl \
+        test-san test-wasm wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -16,69 +32,59 @@ env:
 	$(info )
 
 # The REPL is the test harness, so it is built with the heap verifier compiled in.
-repl: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
-	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ repl.c line_edit.c src/libminilisp.c
+$(B)/repl: $(REPL_DEPS) | $(B)
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ $(REPL_SRC) $(LIB)
 
 # The same interpreter over the other collector. Everything above the strategy seam is
 # shared, so whatever the suite asks of one has to hold for the other. Both are named
 # explicitly rather than one relying on the default, so that changing the default cannot
 # quietly leave the matrix testing the same collector twice.
-repl-copying: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
-	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_COPYING -o $@ repl.c line_edit.c src/libminilisp.c
+$(B)/repl-copying: $(REPL_DEPS) | $(B)
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_COPYING -o $@ $(REPL_SRC) $(LIB)
 
-repl-mark-sweep: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
-	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ repl.c line_edit.c src/libminilisp.c
+$(B)/repl-mark-sweep: $(REPL_DEPS) | $(B)
+	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ $(REPL_SRC) $(LIB)
 
 # The work stack cut to a single entry, so that every collection overflows it and the
 # recovery path runs over and over instead of only being entered once.
-repl-mark-sweep-small: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+$(B)/repl-mark-sweep-small: $(REPL_DEPS) | $(B)
 	$(CC) $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP \
-		-D MINILISP_GC_MARK_STACK=1 -o $@ repl.c line_edit.c src/libminilisp.c
+		-D MINILISP_GC_MARK_STACK=1 -o $@ $(REPL_SRC) $(LIB)
 
 # The strategy is fixed when the library is compiled, so comparing two of them takes two
 # binaries. Built without the verifier: it would charge one strategy for work the other
 # does not do, and the point here is the cost of the real thing.
 BENCH_CFLAGS=$(CFLAGS) -D MINILISP_GC_STATS=1
 
-bench-copying: bench.c src/libminilisp.c src/libminilisp.h
-	$(CC) $(BENCH_CFLAGS) -D MINILISP_GC=MINILISP_GC_COPYING -o $@ bench.c src/libminilisp.c
+$(B)/bench-copying: tools/bench/bench.c $(LIB) src/libminilisp.h | $(B)
+	$(CC) $(BENCH_CFLAGS) -D MINILISP_GC=MINILISP_GC_COPYING -o $@ tools/bench/bench.c $(LIB)
 
-bench-mark-sweep: bench.c src/libminilisp.c src/libminilisp.h
-	$(CC) $(BENCH_CFLAGS) -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ bench.c src/libminilisp.c
+$(B)/bench-mark-sweep: tools/bench/bench.c $(LIB) src/libminilisp.h | $(B)
+	$(CC) $(BENCH_CFLAGS) -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ tools/bench/bench.c $(LIB)
 
-bench: bench-copying bench-mark-sweep
-	@./bench.sh
+bench: $(B)/bench-copying $(B)/bench-mark-sweep
+	@./tools/bench/bench.sh
 
 clean:
-	rm -f bench-copying
-	rm -f bench-mark-sweep
-	rm -f repl
-	rm -f repl-copying
-	rm -f repl-mark-sweep
-	rm -f repl-mark-sweep-small
-	rm -f repl32
-	rm -f repl32-copying
-	rm -f repl32-mark-sweep
-	rm -f repl-san
-	rm -f build/*
+	rm -rf $(B)
 
-test: repl
-	@./test.sh
+test: $(B)/repl
+	@./test/test.sh
 
 # Differential fuzzing. There is no oracle for what a generated program should print,
 # and writing one would mean writing a second interpreter. What there is instead is four
 # builds that must agree -- two collectors, two word sizes, and a sanitizer build -- so a
 # program any two of them disagree on has found a bug with no expected answer written
 # down. Verified non-vacuous against a deliberately broken build.
-fuzz: repl-mark-sweep repl-copying repl32 repl-san
-	@python3 ./fuzz.py $(N)
+fuzz: $(B)/repl-mark-sweep $(B)/repl-copying $(B)/repl32 $(B)/repl-san
+	@python3 ./test/fuzz.py $(N)
 
 N ?= 300
 
 # Line editing, which the shell suite cannot reach: it pipes its input, and the editor
 # turns itself off when the input is not a terminal.
-test-repl: repl
-	@python3 ./test_repl.py ./repl
+test-repl: $(B)/repl
+	@python3 ./test/test_repl.py $(B)/repl
 
 # The suite under AddressSanitizer and UndefinedBehaviorSanitizer. UBSan is the one
 # that matters here: the arithmetic used to overflow, which is undefined, and the check
@@ -88,14 +94,14 @@ test-repl: repl
 #
 # The eval stack budget is raised because ASan's redzones make every C frame larger, so
 # the two tests that pin it to an ESP8266's 2048 bytes would fail for the wrong reason.
-repl-san: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
+$(B)/repl-san: $(REPL_DEPS) | $(B)
 	$(CC) -std=gnu99 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
-		-I src -D MINILISP_GC_DEBUG=1 -o $@ repl.c line_edit.c src/libminilisp.c
+		-I src -D MINILISP_GC_DEBUG=1 -o $@ $(REPL_SRC) $(LIB)
 
-test-san: repl-san
-	@MINILISP_SANITIZED=1 MINILISP_MAX_EVAL_STACK=1048576 REPL=./repl-san ./test.sh
+test-san: $(B)/repl-san
+	@MINILISP_SANITIZED=1 MINILISP_MAX_EVAL_STACK=1048576 REPL=$(B)/repl-san ./test/test.sh
 	@for f in examples/*.lisp; do \
-		MINILISP_MAX_EVAL_STACK=1048576 ./repl-san < $$f > /dev/null 2>/tmp/.san.$$$$ || true; \
+		MINILISP_MAX_EVAL_STACK=1048576 $(B)/repl-san < $$f > /dev/null 2>/tmp/.san.$$$$ || true; \
 		if grep -q "runtime error\|AddressSanitizer" /tmp/.san.$$$$; then \
 			echo "$$f:"; cat /tmp/.san.$$$$; fi; rm -f /tmp/.san.$$$$; \
 	done
@@ -113,14 +119,14 @@ test-san: repl-san
 HAVE_M32 := $(shell printf 'int main(void){return 0;}' > /tmp/.m32probe.c 2>/dev/null && \
 	$(CC) -m32 /tmp/.m32probe.c -o /tmp/.m32probe >/dev/null 2>&1 && echo yes)
 
-repl32: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
-	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ repl.c line_edit.c src/libminilisp.c
+$(B)/repl32: $(REPL_DEPS) | $(B)
+	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -o $@ $(REPL_SRC) $(LIB)
 
-repl32-copying: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
-	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_COPYING -o $@ repl.c line_edit.c src/libminilisp.c
+$(B)/repl32-copying: $(REPL_DEPS) | $(B)
+	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_COPYING -o $@ $(REPL_SRC) $(LIB)
 
-repl32-mark-sweep: repl.c line_edit.c line_edit.h src/libminilisp.c src/libminilisp.h
-	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ repl.c line_edit.c src/libminilisp.c
+$(B)/repl32-mark-sweep: $(REPL_DEPS) | $(B)
+	$(CC) -m32 $(CFLAGS) -D MINILISP_GC_DEBUG=1 -D MINILISP_GC=MINILISP_GC_MARK_SWEEP -o $@ $(REPL_SRC) $(LIB)
 
 # The heap the firmware runs with. This is the point of the 32-bit build: at 64 bits the
 # same suite runs out of memory here, and does so for a reason that does not exist on the
@@ -129,30 +135,30 @@ DEVICE_HEAP ?= 7000
 
 test-32:
 ifeq ($(HAVE_M32),yes)
-	@$(MAKE) --no-print-directory repl32 repl32-copying repl32-mark-sweep
-	@echo "--- 32-bit, copying ---"                && REPL=./repl32-copying ./test.sh
-	@echo "--- 32-bit, copying, verified ---"      && MINILISP_VERIFY_GC=1 REPL=./repl32-copying ./test.sh
-	@echo "--- 32-bit, mark-sweep ---"             && REPL=./repl32-mark-sweep ./test.sh
-	@echo "--- 32-bit, mark-sweep, verified ---"   && MINILISP_VERIFY_GC=1 REPL=./repl32-mark-sweep ./test.sh
+	@$(MAKE) --no-print-directory $(B)/repl32 $(B)/repl32-copying $(B)/repl32-mark-sweep
+	@echo "--- 32-bit, copying ---"                && REPL=$(B)/repl32-copying ./test/test.sh
+	@echo "--- 32-bit, copying, verified ---"      && MINILISP_VERIFY_GC=1 REPL=$(B)/repl32-copying ./test/test.sh
+	@echo "--- 32-bit, mark-sweep ---"             && REPL=$(B)/repl32-mark-sweep ./test/test.sh
+	@echo "--- 32-bit, mark-sweep, verified ---"   && MINILISP_VERIFY_GC=1 REPL=$(B)/repl32-mark-sweep ./test/test.sh
 	@echo "--- 32-bit, mark-sweep, $(DEVICE_HEAP) byte heap ---" && \
-		MINILISP_HEAP_SIZE=$(DEVICE_HEAP) REPL=./repl32-mark-sweep ./test.sh
-	@python3 ./test_repl.py ./repl32
+		MINILISP_HEAP_SIZE=$(DEVICE_HEAP) REPL=$(B)/repl32-mark-sweep ./test/test.sh
+	@python3 ./test/test_repl.py $(B)/repl32
 else
 	@echo "skipped: no 32-bit libc (apt install gcc-multilib libc6-dev-i386)"
 endif
 
-test-mark-sweep: repl-mark-sweep
-	@REPL=./repl-mark-sweep ./test.sh
+test-mark-sweep: $(B)/repl-mark-sweep
+	@REPL=$(B)/repl-mark-sweep ./test/test.sh
 
 # Every strategy, plainly and with the heap checked after each collection. Running the
 # suite without verification still matters: it is the only way a failure shows up as a
 # wrong answer rather than as an abort, which is what a user would actually see.
-test-gc: repl-copying repl-mark-sweep repl-mark-sweep-small
-	@echo "--- copying ---"                 && REPL=./repl-copying ./test.sh
-	@echo "--- copying, verified ---"       && MINILISP_VERIFY_GC=1 REPL=./repl-copying ./test.sh
-	@echo "--- mark-sweep ---"              && REPL=./repl-mark-sweep ./test.sh
-	@echo "--- mark-sweep, verified ---"    && MINILISP_VERIFY_GC=1 REPL=./repl-mark-sweep ./test.sh
-	@echo "--- mark-sweep, 1-entry stack ---" && MINILISP_VERIFY_GC=1 REPL=./repl-mark-sweep-small ./test.sh
+test-gc: $(B)/repl-copying $(B)/repl-mark-sweep $(B)/repl-mark-sweep-small
+	@echo "--- copying ---"                 && REPL=$(B)/repl-copying ./test/test.sh
+	@echo "--- copying, verified ---"       && MINILISP_VERIFY_GC=1 REPL=$(B)/repl-copying ./test/test.sh
+	@echo "--- mark-sweep ---"              && REPL=$(B)/repl-mark-sweep ./test/test.sh
+	@echo "--- mark-sweep, verified ---"    && MINILISP_VERIFY_GC=1 REPL=$(B)/repl-mark-sweep ./test/test.sh
+	@echo "--- mark-sweep, 1-entry stack ---" && MINILISP_VERIFY_GC=1 REPL=$(B)/repl-mark-sweep-small ./test/test.sh
 
 # Sourcing emsdk_env.sh puts the emsdk root on PATH, and that directory contains a
 # `node` subdirectory which shadows the interpreter for PATH lookups. Resolve a regular
@@ -161,10 +167,10 @@ NODE ?= $(shell for d in $$(echo $$PATH | tr ':' ' '); do if [ -f "$$d/node" ] &
 
 test-wasm: wasm
 	@test -n "$(NODE)" || { echo "node not found in PATH"; exit 1; }
-	@$(NODE) test_wasm.cjs
+	@$(NODE) test/test_wasm.cjs
 
 server:
-	emrun --no_browser --port 8000 .
+	emrun --no_browser --port 8000 wasm
 
 
 wasm:
@@ -177,7 +183,7 @@ wasm:
 		-s INITIAL_MEMORY=32MB \
 		-s 'ASYNCIFY_IMPORTS=["js_handle_lisp"]' \
 		-s EXPORTED_RUNTIME_METHODS='["cwrap", "AsciiToString", "writeAsciiToMemory"]' \
-		src/libminilisp.c wasm.c \
+		$(LIB) wasm/wasm.c \
 		-o build/unlisp.js
 
 	cp build/unlisp.js build/unlisp-local.js

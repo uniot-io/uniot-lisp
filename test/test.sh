@@ -2,7 +2,7 @@
 
 # Which interpreter to exercise. The suite is the same for every garbage collection
 # strategy, so `make test-gc` points this at each build in turn.
-REPL="${REPL:-./repl}"
+REPL="${REPL:-build/repl}"
 
 FAILURES=0
 
@@ -234,6 +234,24 @@ run_stack 4096 or-tail-position 0 \
 # Numeric comparisons
 run = \#t '(= 3 3)'
 run = '()' '(= 3 2)'
+
+# `=` coerces a number to a boolean before comparing, which is what makes it useful for
+# testing a flag and what makes it not an equality: it is deliberately not transitive,
+# since (= 1 #t) and (= 2 #t) hold while (= 1 2) does not. `eql` is the equality. This
+# matrix is the whole rule -- a number is true when it is not zero -- and it was only
+# written down in a scratch file until now.
+run =-nonzero-is-true \#t '(= 1 #t)'
+run =-two-is-true \#t '(= 2 #t)'
+run =-large-is-true \#t '(= 2000 #t)'
+run =-negative-is-true \#t '(= -10 #t)'
+run =-zero-is-not-true '()' '(= 0 #t)'
+run =-zero-is-false \#t '(= 0 ())'
+run =-one-is-not-false '()' '(= 1 ())'
+run =-large-is-not-false '()' '(= 200 ())'
+run =-false-equals-false \#t '(= () ())'
+run =-true-equals-true \#t '(= #t #t)'
+run =-false-is-not-true '()' '(= () #t)'
+run_error "= rejects a list" "takes only numbers and booleans" '(= (list 3) (list 3))'
 
 # eq
 run eq \#t "(eql 'foo 'foo)"

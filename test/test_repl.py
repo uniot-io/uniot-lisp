@@ -10,7 +10,7 @@ import os, pty, re, select, sys, tempfile, time
 
 _keep_escapes = False
 
-REPL = sys.argv[1] if len(sys.argv) > 1 else "./repl"
+REPL = sys.argv[1] if len(sys.argv) > 1 else "build/repl"
 HOME = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp()
 
 def session(keys, settle=0.30):

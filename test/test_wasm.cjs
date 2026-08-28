@@ -4,7 +4,7 @@
  *
  * Drives build/unlisp-local.js the same way index.html does, so the JavaScript
  * entry points are exercised and not just compiled. Run it with `make test-wasm`,
- * which builds the module first, or with `node test_wasm.cjs` once build/ exists.
+ * which builds the module first, or with `node test/test_wasm.cjs` once build/ exists.
  *
  * The .cjs extension keeps this loading as CommonJS whatever a package.json
  * elsewhere in the tree may say.
@@ -13,7 +13,8 @@
 const fs = require('fs')
 const path = require('path')
 
-const MODULE_PATH = path.join(__dirname, 'build', 'unlisp-local.js')
+// This file lives in test/, and the build products are in build/ at the repo root.
+const MODULE_PATH = path.join(__dirname, '..', 'build', 'unlisp-local.js')
 if (!fs.existsSync(MODULE_PATH)) {
   console.error(`${MODULE_PATH} not found. Run 'make wasm' first.`)
   process.exit(1)

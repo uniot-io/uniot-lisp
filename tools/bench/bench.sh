@@ -12,8 +12,8 @@
 set -u
 REPEATS="${1:-7}"
 
-COPY=./bench-copying
-MARK=./bench-mark-sweep
+COPY=build/bench-copying
+MARK=build/bench-mark-sweep
 
 for b in "$COPY" "$MARK"; do
   if [ ! -x "$b" ]; then

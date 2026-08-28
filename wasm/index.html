@@ -1,4 +1,4 @@
-<script src="./build/unlisp-local.js"></script>
+<script src="../build/unlisp-local.js"></script>
 <script>
   function timeout(ms) {
     return new Promise(resolve => setTimeout(resolve, ms))
@@ -60,40 +60,24 @@
     }
 
     let error = false
-    let script =
-      '(defun odds (n) (= 1 (% n 2)))\n' +
-      '(defun colors (n) (% n 3))\n' +
-      '(defun odd (n) (= 1 (% n 2)))\n' +
-      '(1 2 3)\n' + // The head of a list must be a function
-      '(color 4)\n' + // Undefined symbol: color
-      '(defun color (n) (% n 3))\n' +
-      '(+ 1 . 2)\n' // Unexpected statement. Evaluation terminated
-    script = "(task -1 500 '(list (print #t_pass)))"
-    script = "(task 10 500 '(list (print #t_pass)))"
-    script = "(task 10 500 '(list (led 0 (= (% #t_pass 2) 1))))"
-    script =
-      '\n' +
-      '(define a #t)' +
-      '\n' +
-      '(define b ())' +
-      '\n' +
-      "(task 0 100 '" +
-      '\n' +
-      '  (list ' +
-      '\n' +
-      "    (print '---)" +
-      '\n' +
-      '    (setq b (bclicked 0))' +
-      '\n' +
-      "    (print (list 'a= a))" +
-      '\n' +
-      "    (print (list 'b= b))" +
-      '\n' +
-      "    (print (list 'a==b (eq a b )))" +
-      '\n' +
-      '  )' +
-      '\n' +
-      ')'
+
+    // Other things worth pointing this at, kept because they exercise different paths:
+    //   "(task -1 500 '(list (print #t_pass)))"          a task that never stops
+    //   "(task 10 500 '(list (print #t_pass)))"          a task with a fixed count
+    //   "(task 10 500 '(list (led 0 (= (% #t_pass 2) 1))))"   driving a host callback
+    const script = [
+      "(define a #t)",
+      "(define b ())",
+      "(task 0 100 '",
+      "  (list ",
+      "    (print '---)",
+      "    (setq b (bclicked 0))",
+      "    (print (list 'a= a))",
+      "    (print (list 'b= b))",
+      "    (print (list 'a==b (eql a b)))",
+      "  )",
+      ")"
+    ].join('\n')
 
     Module.writeAsciiToMemory(script, input_ptr, false)
     Module.writeAsciiToMemory(
@@ -109,7 +93,7 @@
 
     let output_size = await api.lisp_evaluate(
       8000,
-      16, // eval nesting limit; 16 matches an ESP8266, 32 an ESP32, 0 lifts it
+      2048, // bytes of evaluation stack; 2048 is what an ESP8266 is given, 0 lifts it
       library_ptr,
       input_ptr,
       output_ptr,
@@ -126,6 +110,7 @@
     console.log(JSON.parse(result))
     error && console.error('^^^ ERROR OCCURRED!')
 
+    Module._free(library_ptr)
     Module._free(input_ptr)
     Module._free(output_ptr)
     Module._free(handler_out_ptr)
