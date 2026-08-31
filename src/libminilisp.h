@@ -67,9 +67,12 @@ extern "C" {
 //   a call to a function     112 us      what a rule of any substance does
 //
 // so this is between 0.8 and 2.2 seconds of a device sitting on a loop that is never
-// going to end. A workstation is 130 to 150 times faster per iteration, which is why
-// picking this from host timings does not work: 100000 measures as a second there and
-// as four to eleven on the hardware it is meant to protect.
+// going to end.
+//
+// The same two iterations cost 179ns and 364ns on a workstation, 215 to 230 times
+// faster, which is why this number cannot be chosen by timing it on one: a limit picked
+// to cost a second there is two and three quarter million iterations, and those take
+// three and a half minutes on an ESP8266.
 //
 // Generous against what a loop legitimately does rather than against the clock. The
 // largest real nest to be found on a device is a scan of something like a 100x100 grid,
@@ -435,8 +438,8 @@ extern size_t eval_stack_max;
 // Garbage collection strategy. Override it with a build flag.
 //
 //   COPYING     Cheney. Allocation is a pointer bump and collection touches only live
-//               data, but every collection asks the system for a second heap of
-//               MEMORY_SIZE bytes, and objects move, so a reference held anywhere
+//               data, but every collection asks the system for a second heap the size
+//               of the first, and objects move, so a reference held anywhere
 //               outside the root chain goes stale.
 //
 //   MARK_SWEEP  Objects never move and a collection needs no memory beyond the heap
@@ -479,9 +482,6 @@ extern size_t eval_stack_max;
 // that can span the whole heap, so the heap cannot be longer than that field can count.
 // lisp_create() refuses a larger request and lisp_is_created() stays false.
 #define LISP_MAX_HEAP 65535
-
-// The size of the heap in byte
-extern size_t MEMORY_SIZE;
 
 void gc(void *root);
 

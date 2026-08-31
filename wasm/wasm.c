@@ -189,7 +189,9 @@ static void attach_task(void *root, struct Obj **env, int ms, int times)
             if (global_task_terminator) {
                 break;
             }
-            // TODO: disallow endless loops
+            // The loop this runs is bounded twice over: by global_task_limiter above,
+            // and inside the evaluation by MINILISP_MAX_LOOP_ITERATIONS and
+            // MINILISP_MAX_TAIL_CALLS, so a script that never stops is stopped for it.
             (*t_pass)->cdr->value = t;
             eval(root, env, t_obj);
             js_handle_state_task(times, ms, t);

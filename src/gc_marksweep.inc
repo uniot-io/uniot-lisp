@@ -36,7 +36,7 @@
 //
 // Nothing is copied, so a collection needs no memory beyond the heap it already holds.
 // That is the reason to want this strategy on a device: the copying collector has to ask
-// the system for a second heap of MEMORY_SIZE contiguous bytes at the exact moment
+// the system for a second heap of s_heap_requested contiguous bytes at the exact moment
 // memory is tight, and on a fragmented heap that request can fail while plenty of total
 // memory remains. Here there is nothing to fail. Objects also keep their addresses, so a
 // reference that escaped the root chain still points at its object.
@@ -58,7 +58,7 @@
 // reporting "Memory exhausted" with a large free total and a small largest block is the
 // same thing said out loud.
 
-// The heap, and the length actually used. MEMORY_SIZE is rounded down to a whole number
+// The heap, and the length actually used. s_heap_requested is rounded down to a whole number
 // of words: every block size is a multiple of the word size, so a ragged tail could never
 // be handed out anyway, and truncating keeps every block on an aligned address.
 static uint8_t *heap = NULL;
@@ -332,10 +332,12 @@ static bool gc_heap_create(void) {
         return false;
 #endif
 
-    heap_size = MEMORY_SIZE & ~(sizeof(void *) - 1);
+    heap_size = s_heap_requested & ~(sizeof(void *) - 1);
     // One free block has to be able to span the whole heap, so the heap cannot be longer
     // than the size field can count. lisp_create() refuses such a request before getting
-    // here; this is the backstop for anyone setting MEMORY_SIZE directly.
+    // here, and s_heap_requested is not reachable from outside the library, so this
+    // cannot fire today. It stays because it is the collector's own invariant rather
+    // than a restatement of the caller's, and the two could drift apart.
     if (heap_size < MS_MIN_BLOCK || heap_size > LISP_MAX_HEAP)
         return false;
 

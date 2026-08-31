@@ -29,8 +29,15 @@
 #define LISP_ASSERT(cond) ((void)0)
 #endif
 
-// TODO: add comments ------------------------------------------------------
-size_t MEMORY_SIZE = 4000; // default value
+// How many bytes of heap were asked for. lisp_create() allocates and then records it,
+// which is why it is not public: setting it alone would leave every bounds check in both
+// collectors measuring against memory that was never allocated. The default matters only
+// to code reaching the allocator without creating an interpreter, which lisp_is_created()
+// exists to prevent.
+//
+// Distinct from mark-sweep's own `heap_size`, which is this rounded down to a whole
+// number of words. The copying collector uses this figure directly.
+static size_t s_heap_requested = 4000; // default value
 
 // Iterations of the loop nest being run, summed over every loop in it however deeply
 // nested. Nesting is what needs bounding, because an inner loop runs afresh on every
@@ -170,7 +177,6 @@ static void vsprintf_error_to_handler(const char *fmt, va_list ap)
         print_err(s_message_buf, size);
     }
 }
-// TODO: --------------------------------------------------------------------
 
 void __attribute((noreturn)) lisp_error(const char *fmt, ...) {
     // Nothing to do for the loop counters. The tail-call count is a local and goes with
@@ -283,11 +289,13 @@ static void stats_add_gc_time(uint64_t started) {
 // Garbage collector: strategy interface
 //======================================================================
 //
-// Everything outside the strategy section reaches the collector through these. To add
-// a strategy, implement all six below the selector and leave the rest of the file
-// untouched.
+// Everything outside the strategy section reaches the collector through these. To add a
+// strategy, implement the seven below the selector and leave the rest of the file
+// untouched. Five are declared just under this list, gc() is declared in libminilisp.h
+// because callers outside the library use it, and gc_verify() is needed only in a build
+// with MINILISP_GC_DEBUG set.
 //
-//   gc_heap_create()      allocate the heap sized by MEMORY_SIZE; false on failure
+//   gc_heap_create()      allocate the heap sized by s_heap_requested; false on failure
 //   gc_heap_destroy()     release it and reset the strategy's own state
 //   gc_alloc_raw(root, n) at least n bytes of object storage, collecting first if
 //                         required, raising "Memory exhausted" if it cannot be
@@ -607,9 +615,9 @@ static int32_t read_number(int32_t val) {
 
 static Obj *read_symbol(void *root, char c) {
     // Static for the same reason as the formatting buffers: reading a nested expression
-    // recurses, so this would otherwise be 200 bytes of stack per level of nesting in the
-    // source being read. Nothing re-enters it -- it consumes characters and interns the
-    // result, and interning never reads.
+    // recurses, so this would otherwise be SYMBOL_MAX_LEN + 1 bytes of stack -- 65 as it
+    // stands -- for every level of nesting in the source being read. Nothing re-enters
+    // it: it consumes characters and interns the result, and interning never reads.
     static char buf[SYMBOL_MAX_LEN + 1];
     buf[0] = c;
     int len = 1;
@@ -720,7 +728,7 @@ void print(Obj *obj) {
 // No acyclic list can hold more cells than the heap does, so a count past that says the
 // list is circular -- reported as improper, which is what a caller already handles.
 int length(Obj *list) {
-    const size_t limit = MEMORY_SIZE / sizeof(Obj);
+    const size_t limit = s_heap_requested / sizeof(Obj);
     size_t len = 0;
     for (; list->type == TCELL; list = list->cdr)
         if (++len > limit)
@@ -1696,7 +1704,7 @@ static Obj *prim_list(void *root, Obj **env, Obj **list) {
     return eval_list(root, env, list);
 }
 
-// (if expr expr expr ...)
+// (progn expr ...)
 // Sequencing. Blockly had been wrapping multi-statement branches in (list ...) for want
 // of this, which allocated a cons per statement and threw the list away.
 //
@@ -1798,9 +1806,8 @@ static Obj *prim_num_eq(void *root, Obj **env, Obj **list) {
     return True;
 }
 
-// TODO: implement null? function for checking if the object is Nil
 
-// (eq expr expr)
+// (eql expr expr)
 // Named `eql` rather than `eq` because that is what it does. In this family of Lisps
 // `eq` is identity, and identity of numbers is meaningless when they are boxed and not
 // interned -- every literal is a distinct object, so (eq 1 1) is false. `eql` is identity
@@ -1959,7 +1966,7 @@ void lisp_create(size_t size, size_t max_eval_stack)
         // is not created and lisp_is_created() stays false.
         if (size > LISP_MAX_HEAP)
             return;
-        MEMORY_SIZE = size;
+        s_heap_requested = size;
         s_max_eval_stack = max_eval_stack;
         eval_stack_max = 0;
         s_stack_base = NULL;

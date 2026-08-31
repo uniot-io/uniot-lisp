@@ -57,7 +57,7 @@ static inline Obj *forward(Obj *obj) {
     // If the object's address is not in the from-space, the object is not managed by GC nor it
     // has already been moved to the to-space.
     ptrdiff_t offset = (uint8_t *)obj - (uint8_t *)from_space;
-    if (offset < 0 || MEMORY_SIZE <= (size_t)offset)
+    if (offset < 0 || s_heap_requested <= (size_t)offset)
         return obj;
 
     // The pointer is pointing to the from-space, but the object there was a tombstone. Follow the
@@ -82,9 +82,9 @@ static void *alloc_semispace() {
     if (fail_gc_alloc)
         return NULL;
 #endif
-    void *space = malloc(MEMORY_SIZE);
+    void *space = malloc(s_heap_requested);
     if (space != NULL)
-        STATS_SYSTEM_ADD(MEMORY_SIZE);
+        STATS_SYSTEM_ADD(s_heap_requested);
     return space;
 }
 
@@ -113,15 +113,14 @@ void gc(void *root) {
     // the allocation has succeeded, so that a failure leaves the current heap intact
     // and error() can unwind to safe_eval() with the interpreter still usable.
     //
-    // This is a copying collector, so a collection needs a second heap of MEMORY_SIZE
-    // bytes in addition to the one already held. On a fragmented heap that request can
-    // fail even when the total free memory looks sufficient, because it must be
-    // contiguous. Before this check, the collector copied into the NULL it got back.
+    // This is a copying collector, so a collection needs a second heap the same size as
+    // the one already held. On a fragmented heap that request can fail even when the
+    // total free memory looks sufficient, because it must be contiguous. Before this check, the collector copied into the NULL it got back.
     void *to_space = alloc_semispace();
     if (to_space == NULL) {
         // gc_running is cleared by error() before it unwinds.
         error("Out of memory: cannot allocate a GC semi-space of %u bytes",
-              (unsigned)MEMORY_SIZE);
+              (unsigned)s_heap_requested);
     }
     from_space = memory;
     memory = to_space;
@@ -167,7 +166,7 @@ void gc(void *root) {
 
     // Finish up GC.
     free(from_space);
-    STATS_SYSTEM_SUB(MEMORY_SIZE);
+    STATS_SYSTEM_SUB(s_heap_requested);
     const size_t live = (size_t)((uint8_t *)scan1 - (uint8_t *)memory);
 #if MINILISP_GC_DEBUG
     // mem_nused still holds the pre-collection figure at this point.
@@ -183,7 +182,7 @@ void gc(void *root) {
     lisp_stats.traced_bytes += live;
     // Compaction leaves the free space in one run, always.
     lisp_stats.free_blocks = 1;
-    lisp_stats.free_largest = MEMORY_SIZE - live;
+    lisp_stats.free_largest = s_heap_requested - live;
     stats_add_gc_time(stats_started);
 #endif
 
@@ -205,7 +204,7 @@ static bool gc_heap_create(void) {
 
 static void gc_heap_destroy(void) {
     if (memory != NULL)
-        STATS_SYSTEM_SUB(MEMORY_SIZE);
+        STATS_SYSTEM_SUB(s_heap_requested);
     free(memory);
     memory = NULL;
     from_space = NULL;
@@ -219,15 +218,15 @@ static Obj *gc_alloc_raw(void *root, size_t size) {
         gc(root);
 
     // Otherwise collect only when the remaining space is not large enough.
-    if (!always_gc && MEMORY_SIZE < mem_nused + size)
+    if (!always_gc && s_heap_requested < mem_nused + size)
         gc(root);
 
     // Give up if the request still cannot be satisfied, which happens when it is larger than the
     // heap or when the from-space held too many live objects. This collector compacts, so what
     // is free is one run and its size is the whole story.
-    if (MEMORY_SIZE < mem_nused + size)
+    if (s_heap_requested < mem_nused + size)
         error("Memory exhausted: %u wanted, %u free",
-              (unsigned)size, (unsigned)(MEMORY_SIZE - mem_nused));
+              (unsigned)size, (unsigned)(s_heap_requested - mem_nused));
 
     Obj *obj = (Obj *)((char *)memory + mem_nused);
     mem_nused += size;
