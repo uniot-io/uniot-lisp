@@ -183,6 +183,7 @@ wasm:
 		-s INITIAL_MEMORY=32MB \
 		-s 'ASYNCIFY_IMPORTS=["js_handle_lisp"]' \
 		-s EXPORTED_RUNTIME_METHODS='["cwrap", "AsciiToString", "writeAsciiToMemory"]' \
+		--pre-js wasm/pre.js \
 		$(LIB) wasm/wasm.c \
 		-o build/unlisp.js
 

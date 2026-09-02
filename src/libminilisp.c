@@ -1705,8 +1705,8 @@ static Obj *prim_list(void *root, Obj **env, Obj **list) {
 }
 
 // (progn expr ...)
-// Sequencing. Blockly had been wrapping multi-statement branches in (list ...) for want
-// of this, which allocated a cons per statement and threw the list away.
+// Sequencing. Without it, a multi-statement branch has to be wrapped in (list ...),
+// which allocates a cons per statement and throws the list away.
 //
 // eval() intercepts this too, so the last form lands in tail position; this body only
 // runs if `progn` is applied by some other path.
@@ -1734,6 +1734,22 @@ static Obj *prim_if(void *root, Obj **env, Obj **list) {
 // what `=` is for: (= x #t) is unchanged.
 static Obj *prim_not(void *root, Obj **env, Obj **list) {
     return eval_one(root, env, list, "not") == Nil ? True : Nil;
+}
+
+// (bool expr)
+// Coerces to a truth value under the *numeric* convention: 0 and () are false, everything
+// else is true. This is deliberately not the rule `if` uses -- in the language only () is
+// false, and 0 is true, as in every other Lisp. It exists because a device's inputs are
+// numbers: a pin read or an event payload carries its truth as 0 or 1, and (not x) on one
+// of those asks the wrong question. Total on every type, so it never raises and wrapping
+// an already-boolean value is a no-op.
+static Obj *prim_bool(void *root, Obj **env, Obj **list) {
+    Obj *arg = eval_one(root, env, list, "bool");
+    if (arg == Nil)
+        return Nil;
+    if (arg->type == TINT)
+        return arg->value == 0 ? Nil : True;
+    return True;
 }
 
 // (abs <integer>)
@@ -1949,6 +1965,7 @@ void define_primitives(void *root, Obj **env) {
     add_primitive(root, env, "apply", prim_apply);
     add_primitive(root, env, "list", prim_list);
     add_primitive(root, env, "not", prim_not);
+    add_primitive(root, env, "bool", prim_bool);
     add_primitive(root, env, "and", prim_and);
     add_primitive(root, env, "or", prim_or);
 }
@@ -2113,7 +2130,9 @@ int lisp_error_idx(void)
     return current_index;
 }
 
-// Used to simplify the work with the emulator. This has no other practical use!
+// Builds a forwarding definition: a declared name becomes a function that passes its
+// arguments to the named handler. Lets a host declare its own primitives without writing
+// the forwarding out by hand.
 Obj *handle_pruner(void *root, Obj **env, Obj **list, const char *handler_name, bool include_name)
 {
     if ((*list)->car->type != TSYMBOL || (*list)->cdr->type != TCELL || !is_list((*list)->cdr->car))

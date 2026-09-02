@@ -96,6 +96,32 @@ Module.onRuntimeInitialized = async () => {
   check('print', r.json && r.json.out.includes('(1 2 3)'),
     `expected "(1 2 3)" among out, got ${r.raw}`)
 
+  // `print` writes to the log sink, which is a separate stream from the value of each
+  // top-level form. Asserting on `out` alone is not enough: print returns what it printed,
+  // so a top-level (print x) lands in `out` regardless of whether the log sink is wired at
+  // all. These nest it so the two streams must differ.
+  r = await evaluate('(+ 1 (print 5))')
+  check('print goes to the log sink', r.json && r.json.log && r.json.log[0] === '5',
+    `expected log ["5"], got ${r.raw}`)
+  check('print does not disturb the value', r.json && r.json.out[0] === '6',
+    `expected out ["6"], got ${r.raw}`)
+
+  r = await evaluate('(while (< #itr 3) (print #itr))')
+  check('log keeps every write in order',
+    r.json && r.json.log && r.json.log.join(',') === '0,1,2',
+    `expected log ["0","1","2"], got ${r.raw}`)
+
+  // print is a host call in this build, so it lands in the state timeline in the order it
+  // happened, beside the primitives -- rather than in a parallel array that has to be
+  // correlated afterwards, and rather than being invisible until the run finishes.
+  r = await evaluate("(defjs dread (pin))(print 'a)(dread 1)(print 'b)")
+  check('print appears in states, in order',
+    r.json && r.json.states.map(s => s.ask).join(' | ') === "print a | dread 1 | print b",
+    `expected print interleaved with dread, got ${r.raw}`)
+  check('print still returns what it printed',
+    (await evaluate('(+ 1 (print 5))')).json.out[0] === '6',
+    'expected (+ 1 (print 5)) to be 6')
+
   // A result longer than SYMBOL_MAX_LEN used to overflow a fixed stack buffer.
   // It must now come back truncated and marked, with the module still usable.
   // Comfortably past LISP_PRINT_MAX_LEN rather than just over it, so that the check is
@@ -125,8 +151,8 @@ Module.onRuntimeInitialized = async () => {
     r.json.err.msg.includes(longName) && r.size < 0,
     `expected an error naming the symbol and a negative size, got size=${r.size} ${r.raw}`)
 
-  // The emulator reports what a script actually cost, so the editor can warn before a
-  // script is pushed to hardware. Stack is the only figure now: nesting stopped tracking
+  // The result reports what a script actually cost, so a host can warn before the script
+  // is pushed to hardware. Stack is the only figure now: nesting stopped tracking
   // call depth once tail calls were eliminated, so it no longer meant anything a caller
   // could act on.
   r = await evaluate('(+ 1 2)')

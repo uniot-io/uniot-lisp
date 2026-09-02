@@ -22,16 +22,20 @@
 #define MIN_HEAP_SIZE   2000
 #define BUF_OUT_SIZE    10485760 // 10 MB
 #define BUF_STATES_SIZE (BUF_OUT_SIZE - 2048)
+#define BUF_LOG_SIZE    65536
 #define BUF_ERR_SIZE    512
 #define BUF_LIB_SIZE    2048
 #define MAX_TASK_ITER   9999
 
-const char json_mask_result[] = "{ \"out\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total_used\": %lu, \"total_available\": %lu }, \"eval\": { \"stack_used\": %lu, \"stack_limit\": %lu }, \"library\": \"%s\", \"task_limit\": %d, \"time\": %.2g } }";
+const char json_mask_result[] = "{ \"out\": %s, \"log\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total_used\": %lu, \"total_available\": %lu }, \"eval\": { \"stack_used\": %lu, \"stack_limit\": %lu }, \"library\": \"%s\", \"task_limit\": %d, \"time\": %.2g } }";
 const char json_mask_err[] = "{ \"msg\": \"%s\", \"idx\": %d }";
 const char json_mask_state[] = "{ \"ask\": \"%s\", \"answer\": \"%s\" }";
 
 char json_buf_out[BUF_OUT_SIZE] = {0};
 int json_buf_out_idx = 0;
+
+char json_buf_log[BUF_LOG_SIZE] = {0};
+int json_buf_log_idx = 0;
 
 char json_buf_states[BUF_STATES_SIZE] = {0};
 int json_buf_states_idx = 0;
@@ -135,6 +139,23 @@ void print_out(const char *msg, int size)
     if (!mempush(json_buf_out, &json_buf_out_idx, escaped_msg, escaped_size, sizeof(json_buf_out))) return;
     if (!mempush(json_buf_out, &json_buf_out_idx, "\"", 1, sizeof(json_buf_out))) return;
     if (!mempush(json_buf_out, &json_buf_out_idx, ",", 1, sizeof(json_buf_out))) return;
+}
+
+// Where `print` goes. The language writes it to the log sink only, separately from the
+// value of each top-level form, so that a print nested inside an expression is still seen.
+void print_log(const char *msg, int size)
+{
+    char escaped_msg[LISP_PRINT_MAX_LEN * 2];
+    int escaped_size = escape_json_string(msg, escaped_msg, sizeof(escaped_msg));
+    if (escaped_size < 0) {
+        print_err("Failed to escape JSON string in print_log", 0);
+        return;
+    }
+
+    if (!mempush(json_buf_log, &json_buf_log_idx, "\"", 1, sizeof(json_buf_log))) return;
+    if (!mempush(json_buf_log, &json_buf_log_idx, escaped_msg, escaped_size, sizeof(json_buf_log))) return;
+    if (!mempush(json_buf_log, &json_buf_log_idx, "\"", 1, sizeof(json_buf_log))) return;
+    if (!mempush(json_buf_log, &json_buf_log_idx, ",", 1, sizeof(json_buf_log))) return;
 }
 
 // param msg must be null-terminated
@@ -257,6 +278,38 @@ static struct Obj *prim_tojs(void *root, struct Obj **env, struct Obj **list)
     return make_int(root, int_result);
 }
 
+// (print <value>) -- as an outward call, like every other thing the host is asked to do.
+//
+// The core primitive writes to the log sink alone. That lands in an array parallel to
+// `states`, which has to be correlated afterwards to tell which step printed what, and
+// says nothing at all while the script is still running. Going through js_handle_state
+// puts each printed line into the interaction timeline in the order it happened, and
+// hands it to the host immediately. The log sink is still written, so the result keeps a
+// plain list of just what was printed.
+static Obj *prim_print_js(void *root, Obj **env, Obj **list)
+{
+    DEFINE1(tmp);
+    if (length(*list) != 1)
+        *tmp = eval_list(root, env, list);
+    else
+        *tmp = eval(root, env, &(*list)->car);
+
+    char value[LISP_PRINT_MAX_LEN];
+    int len = print_to_buf(value, sizeof(value), 0, *tmp);
+    if (len < 0 || len >= (int)sizeof(value))
+        len = 0;
+    value[len] = 0;
+
+    print_log(value, len);
+
+    char msg[LISP_PRINT_MAX_LEN + 8];
+    snprintf(msg, sizeof(msg), "print %s", value);
+    js_handle_state(msg);
+
+    // print returns what it printed, whatever the host answers.
+    return *tmp;
+}
+
 // (defjs <symbol> (<symbol> ...))
 static Obj *prim_defjs(void *root, Obj **env, Obj **list)
 {
@@ -269,6 +322,8 @@ static void define_custom_items(void *root, struct Obj **env)
     add_primitive(root, env, "tojs", prim_tojs);
 
     add_primitive(root, env, "task", prim_task);
+    // Registered after define_primitives, so this shadows the core print.
+    add_primitive(root, env, "print", prim_print_js);
     add_constant(root, env, "#t_obj", &Nil);
     add_constant_int(root, env, "#t_pass", 0);
 }
@@ -291,7 +346,7 @@ static bool lisp_shoot_once(size_t max_heap, size_t max_eval_stack, const char *
     // lisp_set_printers(NULL, NULL, NULL);
     lisp_eval(root, env, library);
     mem_used_by_library = lisp_mem_used();
-    lisp_set_printers(print_out, NULL, print_err);
+    lisp_set_printers(print_out, print_log, print_err);
     bool success = lisp_eval(root, env, input);
     mem_used_total = lisp_mem_used();
 
@@ -322,10 +377,12 @@ int lisp_evaluate(size_t max_heap, size_t max_eval_stack, const char *library, c
     global_task_terminator = false;
 
     memset(json_buf_out, 0, sizeof(json_buf_out));
+    memset(json_buf_log, 0, sizeof(json_buf_log));
     memset(json_buf_states, 0, sizeof(json_buf_states));
     memset(json_buf_err, 0, sizeof(json_buf_err));
     memcpy(json_buf_err, "null", 5);
     json_buf_out_idx = 0;
+    json_buf_log_idx = 0;
     json_buf_states_idx = 0;
     json_buf_err_idx = 0;
 
@@ -337,18 +394,28 @@ int lisp_evaluate(size_t max_heap, size_t max_eval_stack, const char *library, c
             if (escape_json_string(library, json_buf_lib, sizeof(json_buf_lib)) < 0) {
                 strcpy(json_buf_lib, "");
                 strcpy(json_buf_out, "[]");
+                strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
                 snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Failed to escape library", 0);
                 break;
             }
             if (!mempush(json_buf_out, &json_buf_out_idx, "[", 1, sizeof(json_buf_out))) {
                 strcpy(json_buf_out, "[]");
+                strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
                 snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Output buffer overflow", 0);
                 break;
             }
+            if (!mempush(json_buf_log, &json_buf_log_idx, "[", 1, sizeof(json_buf_log))) {
+                strcpy(json_buf_out, "[]");
+                strcpy(json_buf_log, "[]");
+                strcpy(json_buf_states, "[]");
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Log buffer overflow", 0);
+                break;
+            }
             if (!mempush(json_buf_states, &json_buf_states_idx, "[", 1, sizeof(json_buf_states))) {
                 strcpy(json_buf_out, "[]");
+                strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
                 snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "States buffer overflow", 0);
                 break;
@@ -361,17 +428,28 @@ int lisp_evaluate(size_t max_heap, size_t max_eval_stack, const char *library, c
             // Remove trailing commas
             if (json_buf_out_idx > 0 && json_buf_out[json_buf_out_idx - 1] == ',')
                 json_buf_out_idx--;
+            if (json_buf_log_idx > 0 && json_buf_log[json_buf_log_idx - 1] == ',')
+                json_buf_log_idx--;
             if (json_buf_states_idx > 0 && json_buf_states[json_buf_states_idx - 1] == ',')
                 json_buf_states_idx--;
 
             if (!mempush(json_buf_out, &json_buf_out_idx, "]", 1, sizeof(json_buf_out))) {
                 strcpy(json_buf_out, "[]");
+                strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
                 snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Output buffer overflow", 0);
                 break;
             }
+            if (!mempush(json_buf_log, &json_buf_log_idx, "]", 1, sizeof(json_buf_log))) {
+                strcpy(json_buf_out, "[]");
+                strcpy(json_buf_log, "[]");
+                strcpy(json_buf_states, "[]");
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Log buffer overflow", 0);
+                break;
+            }
             if (!mempush(json_buf_states, &json_buf_states_idx, "]", 1, sizeof(json_buf_states))) {
                 strcpy(json_buf_out, "[]");
+                strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
                 snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "States buffer overflow", 0);
                 break;
@@ -380,12 +458,13 @@ int lisp_evaluate(size_t max_heap, size_t max_eval_stack, const char *library, c
     } else {
         strcpy(json_buf_lib, "");
         strcpy(json_buf_out, "[]");
+        strcpy(json_buf_log, "[]");
         strcpy(json_buf_states, "[]");
         snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Heap must be at least 2000 bytes", 0);
     }
 
     // Safely format the final JSON output
-    int output_size = snprintf(output, BUF_OUT_SIZE, json_mask_result, json_buf_out, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, max_heap, (unsigned long)eval_stack_max,
+    int output_size = snprintf(output, BUF_OUT_SIZE, json_mask_result, json_buf_out, json_buf_log, json_buf_states, json_buf_err, mem_used_init, mem_used_by_library, mem_used_total, max_heap, (unsigned long)eval_stack_max,
                               (unsigned long)max_eval_stack, json_buf_lib, global_task_limiter, time_taken);
     if (output_size < 0 || output_size >= BUF_OUT_SIZE) {
         // Handle output buffer overflow

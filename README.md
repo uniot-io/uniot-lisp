@@ -21,6 +21,11 @@ and no floating point.
 
 `make emsdk` installs the SDK; `make env` prints the line to source before `make wasm`.
 
+The WebAssembly module loads its `.wasm` from the site root, so an application route does
+not turn into a wrong path. Set `globalThis.UNLISP_WASM_URL` before loading to serve it
+from elsewhere; the behaviour lives in `wasm/pre.js` rather than in the generated output,
+so it survives a rebuild.
+
 Products go to `build/`. The interpreter itself is `src/`; everything else is tooling.
 
 ## Embedding
@@ -121,6 +126,26 @@ mean equality.
     (consp '(a))    ; -> #t
     (atom 'a)       ; -> #t
     (not ())        ; -> #t
+
+`bool` coerces to a truth value under the *numeric* convention: `0` and `()` are false,
+everything else is true. This is deliberately not the language's own rule, where only `()`
+is false and `0` is true as in every other Lisp. It exists because a device's inputs are
+numbers — a pin read or an event payload carries its truth as `0` or `1`, and `not` on one
+of those asks the wrong question.
+
+    (bool 0)        ; -> ()
+    (bool 1)        ; -> #t
+    (bool ())       ; -> ()
+    (bool 'a)       ; -> #t
+
+It is total, so it never raises whatever it is given, and it is idempotent — wrapping a
+value that is already a boolean changes nothing. That makes it safe to apply to any
+operand without knowing its type, which is what a code generator needs.
+
+Bind a shorter name for it if a script uses it heavily; `?` is a valid symbol:
+
+    (define ? bool)
+    (? 0)           ; -> ()
 
 ### Conditionals and sequencing
 

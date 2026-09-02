@@ -398,6 +398,21 @@ run_stack 4096 progn-tail-position 0 \
 # anything that is not a number or a boolean.
 run numberp '#t' '(numberp 1)'
 run numberp-negative '()' "(numberp 'a)"
+
+# bool coerces under the numeric convention: 0 and () false, everything else true. It is
+# total, so it never raises, and wrapping an already-boolean value is a no-op.
+run bool-zero '()' '(bool 0)'
+run bool-nonzero '#t' '(bool 1)'
+run bool-negative '#t' '(bool -3)'
+run bool-nil '()' '(bool ())'
+run bool-true '#t' '(bool #t)'
+run bool-symbol '#t' "(bool 'a)"
+run bool-list '#t' "(bool '(1 2))"
+run bool-idempotent '()' '(bool (bool 0))'
+run bool-not-agrees '#t' '(not (bool 0))'
+run bool-alias '()' '(define ? bool) (? 0)'
+run_error "bool arity" "Malformed bool" '(bool 1 2)'
+
 run symbolp '#t' "(symbolp 'a)"
 run consp '#t' '(consp (list 1))'
 run consp-of-empty '()' '(consp ())'
