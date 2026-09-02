@@ -47,6 +47,24 @@ jobs:
       - name: Verify the version matches the tag
         run: make check-version VERSION=${{ steps.version.outputs.version }}
 
+      - name: Build the release notes
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          {
+            if ./tools/changelog-entry.sh "$VERSION" > entry.md; then
+              cat entry.md
+            else
+              echo "::warning::No CHANGELOG.md section for $VERSION; releasing without notes."
+              echo "WASM build for uniot-lisp $VERSION"
+            fi
+            echo
+            echo "## Artifacts"
+            echo "- \`unlisp.wasm\` - WebAssembly module"
+            echo "- \`unlisp.js\` - JavaScript loader"
+          } > release-notes.md
+          echo "--- release notes ---"
+          cat release-notes.md
+
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
@@ -54,12 +72,7 @@ jobs:
           name: Release ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
-          body: |
-            WASM build for uniot-lisp ${{ steps.version.outputs.version }}
-            
-            ## Artifacts
-            - `unlisp.wasm` - WebAssembly module
-            - `unlisp.js` - JavaScript loader
+          body_path: release-notes.md
           files: |
             build/unlisp.wasm
             build/unlisp.js

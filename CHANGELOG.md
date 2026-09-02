@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0
+
+Two changes to what a failure tells the host. Small, but one of them adds to the public
+API, which is why this is a minor rather than a patch.
+
+### Added
+
+- **`lisp_error_end()`**, the end of the span an error covers. The WebAssembly result
+  carries it as `"end"` alongside `"idx"`, so a host can highlight a range rather than
+  place a caret.
+
+### Changed
+
+- **`lisp_error_idx()` reports the form that failed, not the reader's position.** It
+  returned the reader's cursor, which is the right answer while reading but has run past
+  the whole form by the time evaluation fails — and often past the forms after it, so an
+  error inside a function body reported an offset within the later call that triggered it.
+  It now returns the start of the top-level form being evaluated. Read errors still report
+  the cursor, where it was always correct. A host that stored the old value as a caret
+  position will want to treat the pair as a range instead.
+
+### Fixed
+
+- **An improper argument list is refused rather than followed.** `eval_list` walked the
+  cdr chain assuming every link was a cell, so a dotted tail such as `(+ 1 . 2)` ended the
+  walk on an integer and read its union as a pointer — `car` and `value` share an offset —
+  evaluating the number as an address. The pointer check in `eval` caught it, but only
+  after the fact, and reported "Unexpected statement. Evaluation terminated", which says
+  nothing about the problem. It now raises "Argument list is not a proper list". Dotted
+  pairs as data are untouched: `'(1 . 2)`, `(car '(1 . 2))` and `(cons 1 2)` all behave as
+  before.
+
 ## 0.3.0
 
 The first release since 0.2.5, and a large one. Most of what changed was correction
