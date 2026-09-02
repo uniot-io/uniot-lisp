@@ -15,7 +15,7 @@ $(B):
 
 # `wasm` names both a target and a directory, so without this Make sees the directory,
 # decides the target is up to date and builds nothing.
-.PHONY: bench clean fuzz server test test-32 test-gc test-mark-sweep test-repl \
+.PHONY: bench check-version clean fuzz server test test-32 test-gc test-mark-sweep test-repl \
         test-san test-wasm wasm
 
 EMSDK_VERSION=4.0.22
@@ -68,7 +68,12 @@ bench: $(B)/bench-copying $(B)/bench-mark-sweep
 clean:
 	rm -rf $(B)
 
+# Both files that state the version must agree, and match the tag when one is given.
+check-version:
+	@./test/check_version.sh $(VERSION)
+
 test: $(B)/repl
+	@./test/check_version.sh
 	@./test/test.sh
 
 # Differential fuzzing. There is no oracle for what a generated program should print,

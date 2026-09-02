@@ -25,7 +25,7 @@ extern "C" {
 
 #define SEMVER_TO_INT(major, minor, patch) ((major * 10000) + (minor * 100) + patch)
 
-#define LISP_VERSION SEMVER_TO_INT(0, 2, 5)
+#define LISP_VERSION SEMVER_TO_INT(0, 3, 0)
 
 // The three limits below used to be one constant, which meant a symbol name, an error
 // message and a printed value were all bounded by whatever suited the largest of them.
