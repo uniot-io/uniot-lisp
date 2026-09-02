@@ -68,6 +68,18 @@ static bool error_jumper_valid = false;
 static const char *current_buffer = "";
 static size_t current_index = 0;
 
+// Where the top-level form being evaluated begins and ends in the source.
+//
+// current_index is the reader's cursor, which is the right answer only while reading. By
+// the time evaluation fails the reader has already consumed the whole form -- and often
+// the forms after it -- so reporting the cursor points past the problem, sometimes into a
+// later form entirely. Recording the span of the form under evaluation gives a caller
+// something it can highlight.
+static size_t s_form_start = 0;
+static size_t s_form_end = 0;
+static bool s_reading = false;
+static bool s_mark_form = false;
+
 static int buffer_getchar() {
     int r = (int)current_buffer[current_index++];
     if (r == '\0')
@@ -643,6 +655,12 @@ Obj *read_expr(void *root) {
             skip_line();
             continue;
         }
+        // The first character of a token that opens a top-level form, whitespace and
+        // comments already behind us.
+        if (s_mark_form) {
+            s_form_start = current_index - 1;
+            s_mark_form = false;
+        }
         if (c == '(')
             return read_list(root);
         if (c == ')')
@@ -792,6 +810,13 @@ Obj *eval_list(void *root, Obj **env, Obj **list) {
     DEFINE4(head, lp, expr, result);
     *head = Nil;
     for (lp = list; *lp != Nil; *lp = (*lp)->cdr) {
+        // The chain has to be cells all the way to (). Without this, a dotted tail such as
+        // (+ 1 . 2) ends the walk on an integer, and reading its car takes the union as a
+        // pointer -- car and value share an offset -- so the number is evaluated as an
+        // address. eval()'s pointer check does catch it, but only after the confusion, and
+        // what it reports says nothing about what was wrong.
+        if ((*lp)->type != TCELL)
+            error("Argument list is not a proper list");
         *expr = (*lp)->car;
         *result = eval(root, env, expr);
         *head = cons(root, result, head);
@@ -2026,6 +2051,10 @@ bool lisp_eval(void *root, Obj **env, const char *code)
 {
     current_buffer = code;
     current_index = 0;
+    s_form_start = 0;
+    s_form_end = 0;
+    s_reading = false;
+    s_mark_form = false;
 
     // This frame is what the recursion guard measures against.
     char stack_marker;
@@ -2051,7 +2080,11 @@ bool lisp_eval(void *root, Obj **env, const char *code)
             if (!outer_valid)
                 reset_loop_state(root, env);
 
+            s_mark_form = true;
+            s_reading = true;
             *expr = read_expr(root);
+            s_reading = false;
+            s_form_end = current_index;
             if (!*expr) {
                 result = true;
                 break;
@@ -2127,7 +2160,12 @@ size_t lisp_mem_used(void) {
 
 int lisp_error_idx(void)
 {
-    return current_index;
+    return s_reading ? (int)current_index : (int)s_form_start;
+}
+
+int lisp_error_end(void)
+{
+    return s_reading ? (int)current_index : (int)s_form_end;
 }
 
 // Builds a forwarding definition: a declared name becomes a function that passes its

@@ -28,7 +28,7 @@
 #define MAX_TASK_ITER   9999
 
 const char json_mask_result[] = "{ \"out\": %s, \"log\": %s, \"states\": %s, \"err\": %s, \"meta\": { \"memory\": { \"init\": %lu, \"library\": %lu, \"total_used\": %lu, \"total_available\": %lu }, \"eval\": { \"stack_used\": %lu, \"stack_limit\": %lu }, \"library\": \"%s\", \"task_limit\": %d, \"time\": %.2g } }";
-const char json_mask_err[] = "{ \"msg\": \"%s\", \"idx\": %d }";
+const char json_mask_err[] = "{ \"msg\": \"%s\", \"idx\": %d, \"end\": %d }";
 const char json_mask_state[] = "{ \"ask\": \"%s\", \"answer\": \"%s\" }";
 
 char json_buf_out[BUF_OUT_SIZE] = {0};
@@ -116,13 +116,13 @@ void print_err(const char *msg, int size)
     char escaped_msg[BUF_ERR_SIZE - 100]; // Adjust size based on `json_mask_err`
     int escaped_size = escape_json_string(msg, escaped_msg, sizeof(escaped_msg));
     if (escaped_size < 0) {
-        snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Failed to escape error message", 0);
+        snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Failed to escape error message", 0, 0);
         return;
     }
 
-    int formatted_size = snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, escaped_msg, lisp_error_idx());
+    int formatted_size = snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, escaped_msg, lisp_error_idx(), lisp_error_end());
     if (formatted_size < 0 || formatted_size >= BUF_ERR_SIZE) {
-        snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Error message too long", lisp_error_idx());
+        snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Error message too long", lisp_error_idx(), lisp_error_end());
     }
 }
 
@@ -396,28 +396,28 @@ int lisp_evaluate(size_t max_heap, size_t max_eval_stack, const char *library, c
                 strcpy(json_buf_out, "[]");
                 strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
-                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Failed to escape library", 0);
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Failed to escape library", 0, 0);
                 break;
             }
             if (!mempush(json_buf_out, &json_buf_out_idx, "[", 1, sizeof(json_buf_out))) {
                 strcpy(json_buf_out, "[]");
                 strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
-                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Output buffer overflow", 0);
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Output buffer overflow", 0, 0);
                 break;
             }
             if (!mempush(json_buf_log, &json_buf_log_idx, "[", 1, sizeof(json_buf_log))) {
                 strcpy(json_buf_out, "[]");
                 strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
-                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Log buffer overflow", 0);
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Log buffer overflow", 0, 0);
                 break;
             }
             if (!mempush(json_buf_states, &json_buf_states_idx, "[", 1, sizeof(json_buf_states))) {
                 strcpy(json_buf_out, "[]");
                 strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
-                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "States buffer overflow", 0);
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "States buffer overflow", 0, 0);
                 break;
             }
 
@@ -437,21 +437,21 @@ int lisp_evaluate(size_t max_heap, size_t max_eval_stack, const char *library, c
                 strcpy(json_buf_out, "[]");
                 strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
-                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Output buffer overflow", 0);
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Output buffer overflow", 0, 0);
                 break;
             }
             if (!mempush(json_buf_log, &json_buf_log_idx, "]", 1, sizeof(json_buf_log))) {
                 strcpy(json_buf_out, "[]");
                 strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
-                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Log buffer overflow", 0);
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Log buffer overflow", 0, 0);
                 break;
             }
             if (!mempush(json_buf_states, &json_buf_states_idx, "]", 1, sizeof(json_buf_states))) {
                 strcpy(json_buf_out, "[]");
                 strcpy(json_buf_log, "[]");
                 strcpy(json_buf_states, "[]");
-                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "States buffer overflow", 0);
+                snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "States buffer overflow", 0, 0);
                 break;
             }
         } while (0);
@@ -460,7 +460,7 @@ int lisp_evaluate(size_t max_heap, size_t max_eval_stack, const char *library, c
         strcpy(json_buf_out, "[]");
         strcpy(json_buf_log, "[]");
         strcpy(json_buf_states, "[]");
-        snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Heap must be at least 2000 bytes", 0);
+        snprintf(json_buf_err, BUF_ERR_SIZE, json_mask_err, "Heap must be at least 2000 bytes", 0, 0);
     }
 
     // Safely format the final JSON output

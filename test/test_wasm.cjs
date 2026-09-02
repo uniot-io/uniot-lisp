@@ -111,6 +111,25 @@ Module.onRuntimeInitialized = async () => {
     r.json && r.json.log && r.json.log.join(',') === '0,1,2',
     `expected log ["0","1","2"], got ${r.raw}`)
 
+  // An error reports the span of the top-level form that failed, not the reader's cursor.
+  // The cursor is only right while reading: by the time evaluation fails it has consumed
+  // the whole form, and often the forms after it, so it used to point past the problem.
+  r = await evaluate('(+ 1 2)\n(car 5)')
+  check('an error spans the form that failed',
+    r.json && r.json.err && r.json.err.idx === 8 && r.json.err.end === 15,
+    `expected idx 8 and end 15 covering "(car 5)", got ${r.raw}`)
+
+  r = await evaluate('(defun f (x) (+ x missing))\n(f 1)')
+  check('the span follows the call, not the definition',
+    r.json && r.json.err && r.json.err.idx === 28,
+    `expected idx 28 at "(f 1)", got ${r.raw}`)
+
+  // A syntax error has no form yet, so the reader's cursor is the right answer there.
+  r = await evaluate('(car 5')
+  check('a syntax error reports the reader position',
+    r.json && r.json.err && r.json.err.idx === r.json.err.end,
+    `expected idx and end to match for a read error, got ${r.raw}`)
+
   // print is a host call in this build, so it lands in the state timeline in the order it
   // happened, beside the primitives -- rather than in a parallel array that has to be
   // correlated afterwards, and rather than being invisible until the run finishes.

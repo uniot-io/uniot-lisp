@@ -413,6 +413,14 @@ run bool-not-agrees '#t' '(not (bool 0))'
 run bool-alias '()' '(define ? bool) (? 0)'
 run_error "bool arity" "Malformed bool" '(bool 1 2)'
 
+# A dotted tail ends the argument walk on a non-cell. Reading its car would take the
+# union as a pointer, so the number would be evaluated as an address.
+run_error "improper argument list" "Argument list is not a proper list" '(+ 1 . 2)'
+run_error "improper argument list, large" "Argument list is not a proper list" '(+ 1 . 70000)'
+run "dotted pair as data" '(1 . 2)' "'(1 . 2)"
+run "car of a dotted pair" '1' "(car '(1 . 2))"
+run "cons builds a dotted pair" '(1 . 2)' '(cons 1 2)'
+
 run symbolp '#t' "(symbolp 'a)"
 run consp '#t' '(consp (list 1))'
 run consp-of-empty '()' '(consp ())'

@@ -565,7 +565,12 @@ void lisp_set_printers(print_def out, print_def log, print_def err);
 
 size_t lisp_mem_used(void);
 
+// Where the failure was, as offsets into the code last passed to lisp_eval(). While
+// reading, both are the reader's cursor. Once evaluation has begun they are the span of
+// the top-level form being evaluated, which is what a caller can point at: the cursor by
+// then has run past the form, and often past several.
 int lisp_error_idx(void);
+int lisp_error_end(void);
 
 Obj *handle_pruner(void *root, Obj **env, Obj **list, const char *handler_name, bool include_name);
 #ifdef __cplusplus
