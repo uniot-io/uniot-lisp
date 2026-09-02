@@ -25,7 +25,7 @@ emsdk:
 	(cd ./emsdk && ./emsdk install $(EMSDK_VERSION))
 	(cd ./emsdk && ./emsdk activate $(EMSDK_VERSION))
 
-env: 
+env:
 	$(info RUN THIS COMMAND:)
 	$(info )
 	$(info source ./emsdk/emsdk_env.sh --build=Release)
