@@ -1062,6 +1062,15 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
             if (!bind)
                 error("Undefined symbol: %s", (*obj)->name);
             value = bind->cdr;
+            // A constant integer is read as a copy. Its number may be one that is changed in
+            // place -- #itr by every loop, a host's counter such as a task's #t_pass by the
+            // host -- and setq stores the number it is given, not a copy, so a variable set
+            // from the constant itself would change along with it: a saved outer loop count
+            // following the inner loop, a count saved inside a loop reading 0 once the loop
+            // had put #itr back. Copying on every read keeps that out of every path a value
+            // can take -- setq, arguments, lists -- in one place.
+            if ((*obj)->constant && value->type == TINT)
+                value = make_int(root, value->value);
             break;
         }
         default:
@@ -1103,6 +1112,9 @@ Obj *eval(void *root, Obj **env, Obj **obj) {
             Obj *bind = find(cenv, *cur);
             if (!bind)
                 error("Undefined symbol: %s", (*cur)->name);
+            // As above: a constant integer is read as a copy.
+            if ((*cur)->constant && bind->cdr->type == TINT)
+                return make_int(root, bind->cdr->value);
             return bind->cdr;
         }
 

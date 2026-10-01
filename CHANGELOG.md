@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A constant integer is read as a copy, so a variable set from `#itr` or a host's
+  counter keeps the value it was given.** `#itr` is advanced by rewriting the number it
+  holds, a host such as uniot-core advances its own counters (a task's `#t_pass`) the same
+  way, and `setq` stores the number it is given rather than a copy of it — so every
+  variable or list that had been given the counter changed with it. Saving the outer
+  loop's count before an inner loop, `(setq row #itr)`, left `row` following the inner
+  loop; a count saved inside a loop read `0` once the loop ended; a pass number saved by a
+  task read the latest pass. Reading any constant integer now yields a new number. Values
+  compare as before, since `eql` compares numbers by value; the cost is one small
+  allocation per read of an integer constant, a few percent in loops that read them often.
+  Scripts that copied the counter instead, `(+ #itr 0)`, behave as before.
+
 ## 0.4.0
 
 Two changes to what a failure tells the host. Small, but one of them adds to the public

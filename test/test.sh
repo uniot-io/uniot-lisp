@@ -478,6 +478,17 @@ run itr-cleared-after-loop 0 '(while (< #itr 5) 1) #itr'
 run_after_error itr-cleared-after-error 0 '(while (< #itr 5) (car 1))
 #itr'
 
+# A variable given #itr keeps the count it was given. setq stores the number, not a copy
+# of it, so a counter advanced in place took every such variable along: row followed the
+# inner loop, and a value saved inside a loop read 0 once the loop had put #itr back.
+run itr-saved-keeps-value 2 '(define a ()) (while (< #itr 3) (setq a #itr)) a'
+run itr-saved-outer-in-nest 66 '(define row ()) (define sum 0)
+(while (< #itr 3) (setq row #itr) (while (< #itr 4) (setq sum (+ sum (+ (* row 4) #itr)))))
+sum'
+run itr-outer-after-inner "(2 1 0)" '(define seen ())
+(while (< #itr 3) (while (< #itr 4) 1) (setq seen (cons #itr seen)))
+seen'
+
 # The counters bound repetition, not work. Naive fib makes hundreds of thousands of
 # calls, but no one chain of them repeats without end, so nothing here is bounded by
 # either counter. A count of everything eval does -- which is what this replaced --

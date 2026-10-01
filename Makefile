@@ -15,8 +15,8 @@ $(B):
 
 # `wasm` names both a target and a directory, so without this Make sees the directory,
 # decides the target is up to date and builds nothing.
-.PHONY: bench check-version clean fuzz server test test-32 test-gc test-mark-sweep test-repl \
-        test-san test-wasm wasm
+.PHONY: bench check-version clean fuzz server test test-32 test-api test-gc test-mark-sweep \
+        test-repl test-san test-wasm wasm
 
 EMSDK_VERSION=4.0.22
 
@@ -72,9 +72,18 @@ clean:
 check-version:
 	@./test/check_version.sh $(VERSION)
 
-test: $(B)/repl
+test: $(B)/repl test-api
 	@./test/check_version.sh
 	@./test/test.sh
+
+# The C API, for what a host does directly: test/test_api.c. Built with the sanitizers and
+# with each collector, since what it checks is what a script holds on to.
+test-api: | $(B)
+	@for gc in MARK_SWEEP COPYING; do \
+		$(CC) $(CFLAGS) -O1 -fsanitize=address,undefined -D MINILISP_GC=MINILISP_GC_$$gc \
+			-o $(B)/test-api-$$gc test/test_api.c $(LIB) && \
+		echo "--- api, $$gc ---" && $(B)/test-api-$$gc || exit 1; \
+	done
 
 # Differential fuzzing. There is no oracle for what a generated program should print,
 # and writing one would mean writing a second interpreter. What there is instead is four
